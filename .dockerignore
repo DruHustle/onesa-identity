@@ -1,0 +1,7 @@
+*
+!package*.json
+!src/
+!src/**
+!migration/
+!migration/*.js
+!migration/*.sql
