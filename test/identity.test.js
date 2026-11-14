@@ -17,7 +17,7 @@ const env = {
   resources: new Map([
     [
       "https://api.docs.onesa.eu",
-      { product: "engineering-documents", clients: ["docs-web"] },
+      { product: "internal-documents", clients: ["docs-web"] },
     ],
     [
       "https://api.farmer.onesa.eu",
@@ -140,7 +140,12 @@ test("Identity UI changes grant, revocation and suspension at next issuance; res
     303,
   );
   assert.equal((await decision()).status, 403);
-  assert.equal((await mutate(4, "status", "suspended", "")).status, 303);
+  assert.equal((await mutate(4, "grant", "active", "engineering-documents/editor")).status, 303);
+  assert.equal((await mutate(5, "grant", "active", "internal-documents/viewer")).status, 303);
+  assert.deepEqual(await (await decision()).json(), {user_id:user.id,product:"internal-documents",roles:["viewer"]});
+  assert.equal((await mutate(6, "grant", "revoked", "internal-documents/viewer")).status, 303);
+  assert.equal((await decision()).status, 403);
+  assert.equal((await mutate(7, "status", "suspended", "")).status, 303);
   assert.equal((await decision(env.clientId, "")).status, 403);
 });
 test("Portal administrator has no Identity access; stale MFA and forged form denied", async (t) => {
@@ -227,6 +232,7 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
       ],
       grants: [
         { id: second, product: "farmer", role: "user", status: "active" },
+        { id: owner, product: "pasofi", role: "admin", status: "active" },
       ],
       docs: [{ id: second, membership_id, enabled: true }],
       drone_memberships: [],
@@ -245,6 +251,10 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
       const r = applySnapshot(s, "pilot", snapshot, proofs, env.issuer);
       assert.equal(r.accounts, 2);
       assert.equal(s.activeGrant(owner, "identity"), undefined);
+      assert.equal(s.activeGrant(owner, "pasofi"), undefined);
+      assert.equal(s.activeGrant(second, "internal-documents"), undefined);
+      assert.equal(s.activeGrant(second, "engineering-documents").role, "viewer");
+      assert.ok(r.pending.some((x) => x.kind === "review-product-grant"));
       assert.ok(r.pending.some((x) => x.kind === "provider-ownership-proof"));
     }
     x.change("test", second, 1, { kind: "status", status: "suspended" });

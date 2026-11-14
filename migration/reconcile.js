@@ -109,7 +109,12 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         row.status,
       );
     }
-    for (const g of snapshot.grants) grant(g);
+    for (const g of snapshot.grants) {
+      if ((g.product === "pasofi" && g.role !== "customer") || g.product === "internal-documents") {
+        // The Portal export alone cannot prove staff duties or access to other document domains.
+        pending.push({kind: "review-product-grant", id: g.id + "/" + g.product});
+      } else grant(g);
+    }
     for (const d of snapshot.docs) {
       check(
         uuid(d.membership_id) && typeof d.enabled === "boolean",

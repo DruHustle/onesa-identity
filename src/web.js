@@ -113,11 +113,17 @@ export function createApp(store, env, client = authClient(env)) {
       const resource = env.resources.get(audience);
       if (!actor || !resource || !resource.clients.includes(clientId))
         return new Response(null, { status: 403 });
-      const grant = store.activeGrant(actor.id, resource.product);
+      let product = resource.product;
+      // An explicit canonical decision, including removal, supersedes legacy membership.
+      if (product === "internal-documents" &&
+          !store.one("SELECT 1 FROM grants WHERE id=? AND product=?", actor.id, product)) {
+        product = "engineering-documents";
+      }
+      const grant = store.activeGrant(actor.id, product);
       if (!grant) return new Response(null, { status: 403 });
       return Response.json({
         user_id: actor.id,
-        product: resource.product,
+        product,
         roles: [grant.role],
       });
     }

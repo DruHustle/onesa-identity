@@ -4,6 +4,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 export const products = {
   identity: ["admin"],
   portal: ["owner", "administrator", "editor", "business", "hr", "viewer"],
+  "internal-documents": ["viewer", "editor", "admin"],
   "engineering-documents": ["viewer", "editor", "admin"],
   farmer: ["user"],
   logistics: ["user"],
@@ -20,7 +21,7 @@ export const products = {
     "auditor",
     "customer",
   ],
-  pasofi: ["customer"],
+  pasofi: ["customer", "agent", "support", "admin"],
   "diaspora-unlocked": ["user"],
 };
 export const uuid = (value) =>
