@@ -1,0 +1,45 @@
+name: Verify Identity
+on:
+  pull_request:
+  push:
+    branches: [dev, staging, main]
+permissions:
+  contents: read
+jobs:
+  identity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: identity_rollback_test
+          POSTGRES_USER: identity_test
+          POSTGRES_PASSWORD: ci-only-disposable
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U identity_test -d identity_rollback_test"
+          --health-interval 5s --health-timeout 3s --health-retries 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Check out reviewed Portal migrations
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: DruHustle/onesa-company-portal
+          ref: aa0b6b8c58da91e535631edfaa42d556d766c727
+          path: portal-schema
+          sparse-checkout: onesa-company-portal-backend/migrations
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24"
+      - run: npm ci --ignore-scripts --no-audit
+      - run: npm run check
+      - name: Test Identity and rehearse rollback against PostgreSQL
+        env:
+          LEGACY_PORTAL_TEST_URL: postgresql://identity_test:ci-only-disposable@127.0.0.1:${{ job.services.postgres.ports[5432] }}/identity_rollback_test
+          LEGACY_PORTAL_TEST_MIGRATIONS: ${{ github.workspace }}/portal-schema/onesa-company-portal-backend/migrations
+        run: npm test
