@@ -449,7 +449,7 @@ export function createApp(store, env, client = authClient(env)) {
             );
     }
     response.headers.set("cache-control", "no-store");
-    response.headers.set("referrer-policy", "no-referrer");
+    response.headers.set("referrer-policy", "same-origin");
     response.headers.set("x-content-type-options", "nosniff");
     response.headers.set(
       "content-security-policy",

@@ -83,9 +83,10 @@ test("Identity UI changes grant, revocation and suspension at next issuance; res
     a = await login("identity-admin"),
     user = store.register(env.issuer, "auth0|u", "operator@onesa.test");
   assert.equal(a.url, "/admin");
-  const html = await (
-    await call("/admin", "GET", undefined, { cookie: a.cookie })
-  ).text();
+  const adminPage = await call("/admin", "GET", undefined, { cookie: a.cookie });
+  // Chromium sends Origin: null for same-origin forms under no-referrer.
+  assert.equal(adminPage.headers.get("referrer-policy"), "same-origin");
+  const html = await adminPage.text();
   assert.match(html, /Identity administration/);
   const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
   const mutate = (revision, kind, status, assignment) =>
