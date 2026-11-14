@@ -289,24 +289,30 @@ export function createApp(store, env, client = authClient(env)) {
             "Check your inbox before requesting another email.",
             429,
           );
-        const r = await fetch(
-          new URL("/dbconnections/change_password", env.issuer),
-          {
-            method: "POST",
-            redirect: "error",
-            signal: AbortSignal.timeout(5000),
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              client_id: env.clientId,
-              email: session.email,
-              connection: env.connection,
-            }),
-          },
-        );
-        if (!r.ok)
+        let delivered = false;
+        try {
+          const r = await fetch(
+            new URL("/dbconnections/change_password", env.issuer),
+            {
+              method: "POST",
+              redirect: "error",
+              signal: AbortSignal.timeout(5000),
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                client_id: env.clientId,
+                email: session.email,
+                connection: env.connection,
+              }),
+            },
+          );
+          delivered = r.ok;
+        } catch {
+          // Provider timeout or network failure must not become a generic 400.
+        }
+        if (!delivered)
           return page(
             "Recovery unavailable",
-            "Retry from the sign-in screen.",
+            "The recovery provider could not confirm this request. Retry from the sign-in screen.",
             503,
           );
         store.audit(session.id, "request-password-recovery", session.id);
