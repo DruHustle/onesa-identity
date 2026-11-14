@@ -21,6 +21,7 @@ export const products = {
     "customer",
   ],
   pasofi: ["customer"],
+  "diaspora-unlocked": ["user"],
 };
 export const uuid = (value) =>
   typeof value === "string" &&
