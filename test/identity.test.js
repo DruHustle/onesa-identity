@@ -352,4 +352,12 @@ test("password recovery reports provider timeout as 503 without success audit", 
     store.one("SELECT 1 FROM audit WHERE action='request-password-recovery'"),
     undefined,
   );
+  // Ambiguous delivery must not allow repeated password reset messages.
+  const retry = await call(
+    "/account/recovery",
+    "POST",
+    new URLSearchParams({ csrf }),
+    { cookie: user.cookie, origin: env.origin },
+  );
+  assert.equal(retry.status, 429);
 });
