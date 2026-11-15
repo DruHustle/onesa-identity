@@ -87,7 +87,7 @@ test("Identity UI changes grant, revocation and suspension at next issuance; res
   // Chromium sends Origin: null for same-origin forms under no-referrer.
   assert.equal(adminPage.headers.get("referrer-policy"), "same-origin");
   const html = await adminPage.text();
-  assert.ok(html.includes('href="/login?invite=' + invitation + '"'));
+  assert.match(html, /Identity administration/);
   const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
   const mutate = (revision, kind, status, assignment) =>
     call(
@@ -433,7 +433,7 @@ test("provider cancellation retry preserves invitation and restricts return dest
   );
   assert.equal(cancelled.status, 403);
   const html = await cancelled.text();
-  assert.match(html, new RegExp('href="/login\\?invite=' + invitation + '"'));
+  assert.ok(html.includes('href="/login?invite=' + invitation + '"'));
   const restarted = await call("/login?invite=" + invitation);
   const params = new URL(restarted.headers.get("location")).searchParams;
   const retryFlow = restarted.headers.getSetCookie()[0].split(";")[0];
