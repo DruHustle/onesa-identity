@@ -61,13 +61,20 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
       "Additional source snapshots require explicit reconciliation",
     );
     const pending = [],
-      ids = new Set();
+      ids = new Set(),
+      emails = new Set();
     let count = 0;
     for (const u of snapshot.accounts) {
+      // A legacy snapshot can contain multiple accounts sharing a case-variant
+      // address. Do not silently import ambiguous contact ownership or an
+      // address that the live registration path would later refuse.
+      const email = typeof u.email === "string" ? u.email.trim().toLowerCase() : "";
       check(
         uuid(u.id) &&
           !ids.has(u.id) &&
-          reference(u.email) &&
+          email.length <= 254 &&
+          /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email) &&
+          !emails.has(email) &&
           ["active", "suspended"].includes(u.status),
         "Conflicting account snapshot",
       );
@@ -76,10 +83,11 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         "Unknown Portal role",
       );
       ids.add(u.id);
+      emails.add(email);
       store.run(
         "INSERT INTO accounts(id,email,status) VALUES(?,?,?)",
         u.id,
-        u.email.toLowerCase(),
+        email,
         u.status,
       );
       if (u.role !== "member")
