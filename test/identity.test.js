@@ -305,6 +305,42 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
     y.db.close();
   }
 });
+test("legacy import preserves explicit Portal and Engineering grant decisions over inferred memberships", () => {
+  const store = openStore(":memory:");
+  try {
+    const portalUser = randomUUID(), docsUser = randomUUID();
+    const snapshot = {
+      version: 1,
+      accounts: [
+        { id: portalUser, email: "portal@onesa.test", status: "active", role: "owner" },
+        { id: docsUser, email: "docs@onesa.test", status: "active", role: "member" },
+      ],
+      grants: [
+        { id: portalUser, product: "portal", role: "editor", status: "active" },
+        { id: docsUser, product: "engineering-documents", role: "viewer", status: "revoked" },
+      ],
+      docs: [
+        { id: docsUser, membership_id: randomUUID(), enabled: true },
+      ],
+      registrations: [],
+      drone_memberships: [],
+    };
+    applySnapshot(store, "explicit-grants", snapshot, [], env.issuer);
+    assert.equal(store.activeGrant(portalUser, "portal").role, "editor");
+    assert.equal(
+      store.one("SELECT role,status FROM grants WHERE id=? AND product='portal'", portalUser).role,
+      "editor",
+    );
+    assert.equal(
+      store.one("SELECT status FROM grants WHERE id=? AND product='engineering-documents'", docsUser).status,
+      "revoked",
+    );
+    assert.equal(store.activeGrant(docsUser, "engineering-documents"), undefined);
+  } finally {
+    store.db.close();
+  }
+});
+
 test("Auth0 Action emits audience-limited claims and factor timestamp, fails closed on network error", async () => {
   const args = {
     client: { client_id: "docs-web" },
