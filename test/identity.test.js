@@ -453,3 +453,34 @@ test("provider cancellation retry preserves invitation and restricts return dest
   );
   assert.ok((await denied.text()).includes('href="/login"'));
 });
+
+test("a stale tab does not consume the current browser's sign-in challenge", async (t) => {
+  const { call } = await fixture(t);
+  const first = await call("/login");
+  const current = await call("/login?return=/admin");
+  const state = (start) => new URL(start.headers.get("location")).searchParams.get("state");
+  const cookie = current.headers.getSetCookie()[0].split(";")[0];
+  const finish = (start) => call("/callback?code=controlled&state=" + state(start),
+    "GET", undefined, { cookie });
+  assert.equal((await finish(first)).status, 400);
+  const signedIn = await finish(current);
+  assert.equal(signedIn.status, 303);
+  assert.equal(signedIn.headers.get("location"), "/admin");
+  assert.equal((await finish(current)).status, 400);
+});
+
+test("an administrator's status control reflects each persisted account state", async (t) => {
+  const { call, login, store } = await fixture(t);
+  const user = store.register(env.issuer, "fixture|user", "user@example.test");
+  const admin = await login("identity-admin");
+  for (const status of ["pending", "active", "suspended", "rejected"]) {
+    if (status !== "pending") {
+      const { revision } = store.lookup(env.issuer, "fixture|user");
+      store.change("test", user.id, revision, { kind: "status", status });
+    }
+    const page = await call("/admin?id=" + user.id, "GET", undefined, { cookie: admin.cookie });
+    const html = await page.text();
+    const select = html.match(/Account status<select name="status">(.*?)<\/select>/s)[1];
+    assert.deepEqual([...select.matchAll(/<option selected>([^<]+)<\/option>/g)].map(match => match[1]), [status]);
+  }
+});
