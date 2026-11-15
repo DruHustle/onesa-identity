@@ -323,7 +323,7 @@ export function replayDelta(store, bundle) {
         uuid(a.id) &&
           typeof a.email === "string" &&
           a.email.length <= 254 &&
-          /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(a.email) &&
+          /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.email) &&
           a.email === a.email.trim().toLowerCase() &&
           ["pending", "active", "suspended", "rejected"].includes(a.status) &&
           Number.isInteger(a.revision) &&
