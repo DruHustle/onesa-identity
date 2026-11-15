@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { openStore, digest, products } from "../src/store.js";
 import { createApp } from "../src/web.js";
 import { configuration } from "../src/server.js";
@@ -11,6 +16,7 @@ import {
 } from "../migration/reconcile.js";
 import action from "../auth0/post-login.cjs";
 import { applyProofs } from "../migration/link-proof.js";
+import { bootstrapIdentityAdmin } from "../migration/identity-admin.js";
 const env = {
   origin: "https://identity-admin.onesa.test",
   issuer: "https://auth.onesa.test/",
@@ -264,6 +270,57 @@ test("administrators cannot invite an address already owned by a pending or susp
   assert.equal(store.one("SELECT count(*) AS n FROM audit WHERE action='invite'").n, 0);
   assert.equal(store.lookup(env.issuer, "fixture|pending-existing").id, pending.id);
   assert.equal(store.lookup(env.issuer, "fixture|suspended-existing").status, "suspended");
+});
+
+test("Identity administrator bootstrap requires the configured issuer and ignores stale suspended-admin grants", () => {
+  const store = openStore(":memory:");
+  try {
+    const foreign = store.register(
+      "https://attacker.example/",
+      "attacker|admin",
+      "foreign@onesa.test",
+    );
+    assert.throws(
+      () => bootstrapIdentityAdmin(store, env.issuer, foreign.id, "owner-approval"),
+      /configured issuer/,
+    );
+
+    const previous = store.register(env.issuer, "auth0|previous-admin", "previous@onesa.test");
+    store.change("test", previous.id, 1, { kind: "status", status: "active" });
+    store.change("test", previous.id, 2, {
+      kind: "grant", product: "identity", role: "admin", status: "active",
+    });
+    store.change("test", previous.id, 3, { kind: "status", status: "suspended" });
+
+    const replacement = store.register(env.issuer, "auth0|replacement-admin", "replacement@onesa.test");
+    bootstrapIdentityAdmin(store, env.issuer, replacement.id, "independent-owner-approval");
+    assert.equal(store.lookup(env.issuer, "auth0|replacement-admin").status, "active");
+    assert.equal(store.activeGrant(replacement.id, "identity").role, "admin");
+    assert.equal(store.activeGrant(previous.id, "identity"), undefined);
+    assert.throws(
+      () => bootstrapIdentityAdmin(store, env.issuer, foreign.id, "second-approval"),
+      /active Identity administrator already exists/,
+    );
+  } finally {
+    store.db.close();
+  }
+});
+
+test("link-proof CLI creates a private SQLite database when run on a protected host", () => {
+  const directory = mkdtempSync(join(tmpdir(), "onesa-identity-link-proof-"));
+  try {
+    const database = join(directory, "identity.sqlite");
+    const manifest = join(directory, "proofs.json");
+    writeFileSync(manifest, "[]", { mode: 0o600 });
+    const script = fileURLToPath(new URL("../migration/link-proof.js", import.meta.url));
+    const result = spawnSync(process.execPath, [script, database, env.issuer, manifest], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(statSync(database).mode & 0o777, 0o600);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("provider subject proof and one-use invitations preserve account separation", async (t) => {
