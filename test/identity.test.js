@@ -557,3 +557,96 @@ test("an administrator's status control reflects each persisted account state", 
     assert.deepEqual([...select.matchAll(/<option selected>([^<]+)<\/option>/g)].map(match => match[1]), [status]);
   }
 });
+
+test("rollback replay rejects conflicting or malformed account contacts atomically", () => {
+  const source = openStore(":memory:");
+  const restored = openStore(":memory:");
+  try {
+    const id = randomUUID();
+    const snapshot = {
+      version: 1,
+      accounts: [{ id, email: "original@onesa.test", status: "active", role: "member" }],
+      grants: [], docs: [], registrations: [], drone_memberships: [],
+    };
+    for (const s of [source, restored])
+      applySnapshot(s, "recovery-contacts", snapshot, [], env.issuer);
+    const newcomer = source.register(env.issuer, "provider|new", "new@onesa.test");
+    const delta = rollbackDelta(source, "recovery-contacts");
+    const baseline = restored.one("SELECT max(seq) AS seq FROM audit").seq;
+
+    const collision = structuredClone(delta);
+    collision.changed[0].account.email = "original@onesa.test";
+    assert.throws(
+      () => replayDelta(restored, collision),
+      /Conflicting recovered contact ownership/,
+    );
+    assert.equal(restored.lookup(env.issuer, "provider|new"), undefined);
+    assert.equal(restored.one("SELECT max(seq) AS seq FROM audit").seq, baseline);
+
+    for (const email of ["Not-An-Email", " NEW@onesa.test ", "new@onesa.test ", "new user@onesa.test", "new@onesa.test\t"]) {
+      const malformed = structuredClone(delta);
+      malformed.changed[0].account.email = email;
+      assert.throws(
+        () => replayDelta(restored, malformed),
+        /Invalid recovered account state/,
+      );
+      assert.equal(restored.lookup(env.issuer, "provider|new"), undefined);
+      assert.equal(restored.one("SELECT max(seq) AS seq FROM audit").seq, baseline);
+    }
+    const result = replayDelta(restored, delta);
+    assert.equal(result.replay, false);
+    assert.equal(restored.lookup(env.issuer, "provider|new").id, newcomer.id);
+    assert.equal(restored.lookup(env.issuer, "provider|new").email, "new@onesa.test");
+  } finally {
+    source.db.close();
+    restored.db.close();
+  }
+});
+
+test("idempotent rollback replay also invalidates restored sessions, invites and challenges", () => {
+  const source = openStore(":memory:");
+  const restored = openStore(":memory:");
+  try {
+    const snapshot = {
+      version: 1,
+      accounts: [{ id: randomUUID(), email: "original@onesa.test", status: "active", role: "member" }],
+      grants: [], docs: [], registrations: [], drone_memberships: [],
+    };
+    for (const s of [source, restored])
+      applySnapshot(s, "recovery-expiry", snapshot, [], env.issuer);
+    const newcomer = source.register(env.issuer, "provider|fresh", "fresh@onesa.test");
+    const delta = rollbackDelta(source, "recovery-expiry");
+    assert.equal(replayDelta(restored, delta).replay, false);
+
+    // An idempotent retry must detect unjournaled data drift, not just the
+    // fact that an identical audit sequence has already been applied.
+    restored.run("UPDATE accounts SET status='active' WHERE id=?", newcomer.id);
+    assert.throws(() => replayDelta(restored, delta), /divergent account state/);
+    restored.run("UPDATE accounts SET status='pending' WHERE id=?", newcomer.id);
+
+    restored.run("INSERT INTO grants VALUES(?,?,?,?)",
+      newcomer.id, "farmer", "user", "active");
+    assert.throws(() => replayDelta(restored, delta), /divergent grants/);
+    restored.run("DELETE FROM grants WHERE id=?", newcomer.id);
+
+    const evidence = restored.one("SELECT evidence FROM links WHERE id=?", newcomer.id).evidence;
+    restored.run("UPDATE links SET evidence='tampered' WHERE id=?", newcomer.id);
+    assert.throws(() => replayDelta(restored, delta), /divergent provider links/);
+    restored.run("UPDATE links SET evidence=? WHERE id=?", evidence, newcomer.id);
+
+    // Model credentials accidentally reintroduced from a restored backup.
+    restored.run("INSERT INTO sessions VALUES(?,?,?,?,?)",
+      digest("stale-session"), newcomer.id, "csrf", Date.now() + 600000, 0);
+    restored.run("INSERT INTO invites VALUES(?,?,?)",
+      digest("stale-invite"), "fresh@onesa.test", Date.now() + 600000);
+    restored.run("INSERT INTO challenges VALUES(?,?,?,?,?,?)",
+      digest("stale-flow"), "state", "nonce", "verifier", "/account", Date.now() + 600000);
+    assert.equal(replayDelta(restored, delta).replay, true);
+    for (const table of ["sessions", "invites", "challenges"])
+      assert.equal(restored.one(`SELECT count(*) AS n FROM ${table}`).n, 0, table);
+    assert.equal(restored.lookup(env.issuer, "provider|fresh").id, newcomer.id);
+  } finally {
+    source.db.close();
+    restored.db.close();
+  }
+});
