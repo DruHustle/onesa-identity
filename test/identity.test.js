@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { openStore, digest } from "../src/store.js";
+import { openStore, digest, products } from "../src/store.js";
 import { createApp } from "../src/web.js";
 import {
   applySnapshot,
@@ -360,4 +360,21 @@ test("password recovery reports provider timeout as 503 without success audit", 
     { cookie: user.cookie, origin: env.origin },
   );
   assert.equal(retry.status, 429);
+});
+
+test("unrelated Diaspora Unlocked cannot be assigned an Onesa product role", () => {
+  assert.equal(Object.hasOwn(products, "diaspora-unlocked"), false);
+  const store = openStore(":memory:");
+  try {
+    const account = store.register(env.issuer, "oidc|external-test", "external@onesa.test");
+    assert.throws(
+      () => store.change("admin", account.id, account.revision, {
+        kind: "grant", product: "diaspora-unlocked", role: "user", status: "active",
+      }),
+      /Invalid product role/,
+    );
+    assert.equal(store.activeGrant(account.id, "diaspora-unlocked"), undefined);
+  } finally {
+    store.db.close();
+  }
 });
