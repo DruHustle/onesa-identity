@@ -277,7 +277,16 @@ export function replayDelta(store, bundle) {
         JSON.stringify(existing) === JSON.stringify(bundle.events),
         "Recovery target has divergent writes",
       );
+      // An already replayed journal must not preserve browser credentials or
+      // unused invitations that might have been restored from an old backup.
+      check(
+        !store.one("SELECT 1 FROM accounts GROUP BY email COLLATE NOCASE HAVING count(*)>1 LIMIT 1"),
+        "Conflicting recovered contact ownership",
+      );
       clearResolvedProofs(store);
+      store.run("DELETE FROM sessions");
+      store.run("DELETE FROM invites");
+      store.run("DELETE FROM challenges");
       return { replay: true, accounts: actual.length };
     }
     for (const x of bundle.changed) {
@@ -285,9 +294,13 @@ export function replayDelta(store, bundle) {
       check(
         uuid(a.id) &&
           typeof a.email === "string" &&
+          a.email.length <= 254 &&
+          /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(a.email) &&
+          a.email === a.email.trim().toLowerCase() &&
+          ["pending", "active", "suspended", "rejected"].includes(a.status) &&
           Number.isInteger(a.revision) &&
           a.revision >= 1,
-        "Invalid account state",
+        "Invalid recovered account state",
       );
       store.run(
         "INSERT INTO accounts(id,email,status,revision) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,status=excluded.status,revision=excluded.revision",
@@ -326,6 +339,14 @@ export function replayDelta(store, bundle) {
         );
       }
     }
+    // The baseline and the delta must retain unique canonical contacts, even
+    // when a protected recovery bundle is corrupted or supplied out of order.
+    // Check the final transactional state so two legitimate email swaps are
+    // not rejected merely because of the order of account upserts.
+    check(
+      !store.one("SELECT 1 FROM accounts GROUP BY email COLLATE NOCASE HAVING count(*)>1 LIMIT 1"),
+      "Conflicting recovered contact ownership",
+    );
     for (const e of bundle.events)
       store.run(
         "INSERT INTO audit VALUES(?,?,?,?,?,?)",
