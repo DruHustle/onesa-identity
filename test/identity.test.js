@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { openStore, digest, products } from "../src/store.js";
 import { createApp } from "../src/web.js";
+import { configuration } from "../src/server.js";
 import {
   applySnapshot,
   replayDelta,
@@ -10,6 +11,62 @@ import {
 } from "../migration/reconcile.js";
 import action from "../auth0/post-login.cjs";
 import { applyProofs } from "../migration/link-proof.js";
+test("resource registry rejects missing, non-HTTPS and ambiguous audiences", () => {
+  const base = {
+    OIDC_ISSUER: env.issuer,
+    IDENTITY_ORIGIN: env.origin,
+    OIDC_CLIENT_ID: env.clientId,
+    OIDC_CLIENT_SECRET: "controlled-client-secret",
+    ACTION_POLICY_KEY: "x".repeat(32),
+  };
+  const valid = {
+    "https://api.docs.onesa.eu": {
+      product: "internal-documents",
+      clients: ["docs-web"],
+    },
+  };
+  assert.equal(
+    configuration({
+      ...base,
+      RESOURCE_CLIENTS_JSON: JSON.stringify(valid),
+    }).resources.get("https://api.docs.onesa.eu").product,
+    "internal-documents",
+  );
+  for (const audience of [
+    "",
+    "not-a-url",
+    "http://api.docs.onesa.eu",
+    "https://user:pass@api.docs.onesa.eu",
+    "https://api.docs.onesa.eu?forward=1",
+    "https://api.docs.onesa.eu#fragment",
+  ]) {
+    assert.throws(
+      () =>
+        configuration({
+          ...base,
+          RESOURCE_CLIENTS_JSON: JSON.stringify({
+            [audience]: { product: "farmer", clients: ["farmer-web"] },
+          }),
+        }),
+      /Invalid resource registry/,
+      audience,
+    );
+  }
+  assert.throws(
+    () =>
+      configuration({
+        ...base,
+        RESOURCE_CLIENTS_JSON: JSON.stringify({
+          "https://api.docs.onesa.eu": {
+            product: "farmer",
+            clients: ["farmer-web", "farmer-web"],
+          },
+        }),
+      }),
+    /Invalid resource registry/,
+  );
+});
+
 const env = {
   origin: "https://identity-admin.onesa.test",
   issuer: "https://auth.onesa.test/",
