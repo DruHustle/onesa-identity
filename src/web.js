@@ -355,7 +355,8 @@ export function createApp(store, env, client = authClient(env)) {
     }
     if (!["/admin", "/admin/change", "/admin/invite"].includes(p))
       return page("Page unavailable", "", 404);
-    if (!session || !store.activeGrant(session.id, "identity"))
+    const identityGrant = session && store.activeGrant(session.id, "identity");
+    if (!session || identityGrant?.role !== "admin")
       return page("Identity administrator required", "", 403);
     if (!session.mfa_at || Date.now() - session.mfa_at > 300000)
       return page(
