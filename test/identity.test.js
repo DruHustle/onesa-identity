@@ -214,7 +214,8 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
   try {
     const owner = randomUUID(),
       second = randomUUID(),
-      membership_id = randomUUID();
+      membership_id = randomUUID(),
+      disabled_membership_id = randomUUID();
     const snapshot = {
       version: 1,
       accounts: [
@@ -235,7 +236,10 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
         { id: second, product: "farmer", role: "user", status: "active" },
         { id: owner, product: "pasofi", role: "admin", status: "active" },
       ],
-      docs: [{ id: second, membership_id, enabled: true }],
+      docs: [
+        { id: second, membership_id, enabled: true },
+        { id: second, membership_id: disabled_membership_id, enabled: false },
+      ],
       drone_memberships: [],
       registrations: [],
     };
@@ -255,6 +259,10 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
       assert.equal(s.activeGrant(owner, "pasofi"), undefined);
       assert.equal(s.activeGrant(second, "internal-documents"), undefined);
       assert.equal(s.activeGrant(second, "engineering-documents").role, "viewer");
+      assert.equal(
+        s.one("SELECT count(*) AS n FROM legacy_inventory WHERE kind='docs'").n,
+        2,
+      );
       assert.ok(r.pending.some((x) => x.kind === "review-product-grant"));
       assert.ok(r.pending.some((x) => x.kind === "provider-ownership-proof"));
     }
