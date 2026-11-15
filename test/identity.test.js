@@ -420,3 +420,36 @@ test("OIDC callback preserves a validated invitation destination", async (t) => 
   assert.equal(result.status, 303);
   assert.equal(result.headers.get("location"), "/account?invite=" + invitation);
 });
+
+test("provider cancellation retry preserves invitation and restricts return destinations", async (t) => {
+  const { call } = await fixture(t);
+  const invitation = "b".repeat(43);
+  const start = await call("/register?invite=" + invitation);
+  const state = new URL(start.headers.get("location")).searchParams.get("state");
+  const flow = start.headers.getSetCookie()[0].split(";")[0];
+  const cancelled = await call(
+    "/callback?error=access_denied&state=" + encodeURIComponent(state),
+    "GET", undefined, { cookie: flow },
+  );
+  assert.equal(cancelled.status, 403);
+  const html = await cancelled.text();
+  assert.ok(html.includes('href="/login?invite=' + invitation + '"'));
+  const restarted = await call("/login?invite=" + invitation);
+  const params = new URL(restarted.headers.get("location")).searchParams;
+  const retryFlow = restarted.headers.getSetCookie()[0].split(";")[0];
+  const success = await call(
+    "/callback?code=controlled&state=" + encodeURIComponent(params.get("state")),
+    "GET", undefined, { cookie: retryFlow },
+  );
+  assert.equal(success.status, 303);
+  assert.equal(success.headers.get("location"), "/account?invite=" + invitation);
+
+  const malicious = await call("/login?return=" + encodeURIComponent("https://attacker.invalid/"));
+  const maliciousParams = new URL(malicious.headers.get("location")).searchParams;
+  const maliciousFlow = malicious.headers.getSetCookie()[0].split(";")[0];
+  const denied = await call(
+    "/callback?error=access_denied&state=" + encodeURIComponent(maliciousParams.get("state")),
+    "GET", undefined, { cookie: maliciousFlow },
+  );
+  assert.ok((await denied.text()).includes('href="/login"'));
+});
