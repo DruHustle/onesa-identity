@@ -625,7 +625,10 @@ test("legacy import rejects duplicate Engineering membership owners atomically",
       /Duplicate Engineering membership owner/,
     );
     assert.equal(store.one("SELECT count(*) AS n FROM accounts").n, 0);
-    assert.equal(store.one("SELECT count(*) AS n FROM legacy_inventory").n, 0);
+    assert.equal(
+      store.one("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name='legacy_inventory'").n,
+      0,
+    );
     assert.equal(store.one("SELECT count(*) AS n FROM imports").n, 0);
     assert.equal(store.one("SELECT count(*) AS n FROM audit").n, 0);
   } finally {
