@@ -361,3 +361,25 @@ test("password recovery reports provider timeout as 503 without success audit", 
   );
   assert.equal(retry.status, 429);
 });
+
+test("verified email change preserves stable user ID, grants, and audit trail", (t) => {
+  const store = openStore(":memory:");
+  t.after(() => store.db.close());
+  const original = store.register(env.issuer, "oidc|stable", "old@onesa.test");
+  store.change("test", original.id, 1, { kind: "status", status: "active" });
+  store.change("test", original.id, 2, {
+    kind: "grant", product: "farmer", role: "user", status: "active",
+  });
+  const updated = store.register(env.issuer, "oidc|stable", "NEW@onesa.test");
+  assert.equal(updated.id, original.id);
+  assert.equal(updated.email, "new@onesa.test");
+  assert.equal(store.activeGrant(original.id, "farmer").role, "user");
+  assert.equal(store.one("SELECT action FROM audit WHERE action='verified-email-change'").action, "verified-email-change");
+  const other = store.register(env.issuer, "oidc|other", "other@onesa.test");
+  assert.throws(
+    () => store.register(env.issuer, "oidc|stable", "other@onesa.test"),
+    /ownership verification/,
+  );
+  assert.equal(store.lookup(env.issuer, "oidc|stable").email, "new@onesa.test");
+  assert.equal(store.lookup(env.issuer, "oidc|other").id, other.id);
+});
