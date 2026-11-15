@@ -174,9 +174,9 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
           kind === "grant"
             ? ids.has(row.id)
             : kind === "drone"
-              ? ids.has(row.user_id) && uuid(row.tenant_id)
+              ? ids.has(row.user_id) && uuid(row.tenant_id) && products.drone.includes(row.role)
               : uuid(id),
-          "Invalid source reference",
+          "Invalid source reference or product role",
         );
         store.run(
           "INSERT INTO legacy_inventory VALUES(?,?,?)",
