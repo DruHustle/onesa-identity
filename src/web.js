@@ -45,7 +45,7 @@ const redirect = (url, cookies = []) => {
 const retryPath = (destination, origin) => {
   const target = new URL(destination, origin);
   const invite = target.searchParams.get("invite");
-  if (invite && /^[\\w-]{43}$/.test(invite))
+  if (invite && /^[A-Za-z0-9_-]{43}$/.test(invite))
     return "/login?invite=" + encodeURIComponent(invite);
   return target.pathname === "/admin" ? "/login?return=%2Fadmin" : "/login";
 };
