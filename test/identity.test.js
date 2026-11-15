@@ -366,16 +366,20 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
 test("legacy import preserves explicit Portal and Engineering grant decisions over inferred memberships", () => {
   const store = openStore(":memory:");
   try {
-    const portalUser = randomUUID(), docsUser = randomUUID();
+    const portalUser = randomUUID(),
+      docsUser = randomUUID(),
+      identityAdmin = randomUUID();
     const snapshot = {
       version: 1,
       accounts: [
         { id: portalUser, email: "portal@onesa.test", status: "active", role: "owner" },
         { id: docsUser, email: "docs@onesa.test", status: "active", role: "member" },
+        { id: identityAdmin, email: "identity-admin@onesa.test", status: "active", role: "member" },
       ],
       grants: [
         { id: portalUser, product: "portal", role: "editor", status: "active" },
         { id: docsUser, product: "engineering-documents", role: "viewer", status: "revoked" },
+        { id: identityAdmin, product: "identity", role: "admin", status: "active" },
       ],
       docs: [
         { id: docsUser, membership_id: randomUUID(), enabled: true },
@@ -394,6 +398,12 @@ test("legacy import preserves explicit Portal and Engineering grant decisions ov
       "revoked",
     );
     assert.equal(store.activeGrant(docsUser, "engineering-documents"), undefined);
+    assert.equal(store.activeGrant(identityAdmin, "identity"), undefined);
+    assert.ok(
+      store.all("SELECT kind,id FROM migration_discrepancies").some(
+        (row) => row.kind === "review-product-grant" && row.id === identityAdmin + "/identity",
+      ),
+    );
   } finally {
     store.db.close();
   }
