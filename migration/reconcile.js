@@ -20,6 +20,79 @@ function reference(value) {
     typeof value === "string" && value.trim().length > 0 && value.length <= 400
   );
 }
+
+function captureBaseline(store) {
+  store.db.exec(`CREATE TABLE migration_baseline(
+    kind TEXT NOT NULL, id TEXT NOT NULL, record TEXT NOT NULL,
+    PRIMARY KEY(kind,id)
+  )`);
+  const inventories = [
+    ["account", store.all("SELECT * FROM accounts ORDER BY id"), (row) => row.id],
+    ["grant", store.all("SELECT * FROM grants ORDER BY id,product"), (row) => row.id + "/" + row.product],
+    ["link", store.all("SELECT * FROM links ORDER BY issuer,subject"), (row) => digest(row.issuer + "\\0" + row.subject)],
+  ];
+  for (const [kind, rows, key] of inventories)
+    for (const row of rows)
+      store.run(
+        "INSERT INTO migration_baseline VALUES(?,?,?)",
+        kind,
+        key(row),
+        JSON.stringify(canonical(row)),
+      );
+}
+
+// Compare the restored cutover baseline with an inventory captured inside
+// the original import transaction. During an idempotent replay, accounts
+// named by the journal are checked against the delta below; every other
+// account, grant and provider link must still equal the frozen baseline.
+function verifyBaselineIntegrity(store, changedIds = new Set()) {
+  check(
+    store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_baseline'"),
+    "Recovery target has no cutover integrity inventory; rebuild it from the protected source snapshot",
+  );
+  const inventories = [
+    {
+      kind: "account",
+      rows: () => store.all("SELECT * FROM accounts ORDER BY id"),
+      key: (row) => row.id,
+      owner: (row) => row.id,
+    },
+    {
+      kind: "grant",
+      rows: () => store.all("SELECT * FROM grants ORDER BY id,product"),
+      key: (row) => row.id + "/" + row.product,
+      owner: (row) => row.id,
+    },
+    {
+      kind: "link",
+      rows: () => store.all("SELECT * FROM links ORDER BY issuer,subject"),
+      key: (row) => digest(row.issuer + "\\0" + row.subject),
+      owner: (row) => row.id,
+    },
+  ];
+  for (const inventory of inventories) {
+    const expected = store
+      .all("SELECT id,record FROM migration_baseline WHERE kind=?", inventory.kind)
+      .filter((entry) => !changedIds.has(JSON.parse(entry.record).id))
+      .map((entry) => ({
+        id: entry.id,
+        record: JSON.stringify(canonical(JSON.parse(entry.record))),
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const actual = inventory
+      .rows()
+      .filter((row) => !changedIds.has(inventory.owner(row)))
+      .map((row) => ({
+        id: inventory.key(row),
+        record: JSON.stringify(canonical(row)),
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    check(
+      JSON.stringify(actual) === JSON.stringify(expected),
+      "Recovery target has divergent baseline " + inventory.kind + " inventory",
+    );
+  }
+}
 export function applySnapshot(store, key, snapshot, proofs, issuer) {
   check(
     reference(key) &&
@@ -47,6 +120,10 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
       check(
         prior.digest === fingerprint,
         "Snapshot key reused with different data",
+      );
+      check(
+        store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_baseline'"),
+        "Cutover predates recovery integrity inventory; rebuild it from the protected source snapshot",
       );
       return {
         replay: true,
@@ -256,6 +333,7 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         item.kind,
         item.id,
       );
+    captureBaseline(store);
     store.audit("migration", "snapshot", null, {
       key,
       fingerprint,
@@ -330,6 +408,7 @@ export function replayDelta(store, bundle) {
       "SELECT * FROM audit WHERE seq>? ORDER BY seq",
       source.watermark,
     );
+    verifyBaselineIntegrity(store, existing.length ? new Set(actual) : new Set());
     if (existing.length) {
       check(
         JSON.stringify(existing) === JSON.stringify(bundle.events),
