@@ -99,7 +99,7 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
           u.id,
           "portal",
           u.role,
-          "active",
+          ["owner", "administrator"].includes(u.role) ? "pending" : "active",
         );
       // Old global-admin and implicit Farmer rights require an explicit resource-owner disposition.
       if (u.role !== "member")
@@ -129,6 +129,14 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         // A Portal export cannot prove staff duties, Identity administration,
         // or access to separately owned document domains.
         pending.push({ kind: "review-product-grant", id: g.id + "/" + g.product });
+      } else if (
+        g.product === "portal" &&
+        ["owner", "administrator"].includes(g.role)
+      ) {
+        // Legacy global Portal roles require an explicit owner review before
+        // they can become active product access.
+        pending.push({ kind: "review-product-grant", id: g.id + "/portal" });
+        grant({ ...g, status: g.status === "active" ? "pending" : g.status });
       } else {
         grant(g);
       }
