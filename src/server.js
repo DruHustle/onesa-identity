@@ -23,12 +23,35 @@ export function configuration(env) {
   const resources = new Map(),
     catalog = JSON.parse(required("RESOURCE_CLIENTS_JSON"));
   for (const [audience, resource] of Object.entries(catalog)) {
+    let endpoint;
+    try {
+      if (typeof audience !== "string" || !audience || audience.trim() !== audience)
+        throw Error("Invalid audience");
+      endpoint = new URL(audience);
+    } catch {
+      throw Error("Invalid resource registry");
+    }
     if (
+      endpoint.protocol !== "https:" ||
+      endpoint.username ||
+      endpoint.password ||
+      endpoint.search ||
+      endpoint.hash ||
+      !resource ||
+      typeof resource !== "object" ||
+      Array.isArray(resource) ||
       !Object.hasOwn(products, resource.product) ||
       resource.product === "identity" ||
       !Array.isArray(resource.clients) ||
       !resource.clients.length ||
-      resource.clients.some((c) => typeof c !== "string" || !c)
+      resource.clients.some(
+        (c) =>
+          typeof c !== "string" ||
+          !c ||
+          c.trim() !== c ||
+          c.length > 256,
+      ) ||
+      new Set(resource.clients).size !== resource.clients.length
     )
       throw Error("Invalid resource registry");
     resources.set(audience, resource);
