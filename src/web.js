@@ -278,11 +278,10 @@ export function createApp(store, env, client = authClient(env)) {
         return new Response(null, { status: 403 });
       if (p === "/account/recovery" && env.connection) {
         const recoveryNow = Date.now();
-        const recoveryNext = recoveryNow + 60000;
         const claimed = store.run(
           "INSERT INTO recovery_limit VALUES(?,?) ON CONFLICT(id) DO UPDATE SET next=excluded.next WHERE recovery_limit.next<=?",
           session.id,
-          recoveryNext,
+          recoveryNow + 60000,
           recoveryNow,
         ).changes;
         if (!claimed)
@@ -312,13 +311,8 @@ export function createApp(store, env, client = authClient(env)) {
           // Provider timeout or network failure must not become a generic 400.
         }
         if (!delivered) {
-          // Release the reservation only if it is still ours; a newer request
-          // must not have its rate limit cleared by an older failed response.
-          store.run(
-            "DELETE FROM recovery_limit WHERE id=? AND next=?",
-            session.id,
-            recoveryNext,
-          );
+          // A timeout has an ambiguous delivery outcome. Retain the rate
+          // limit so repeated requests cannot flood the recipient's inbox.
           return page(
             "Recovery unavailable",
             "The recovery provider could not confirm this request. Retry from the sign-in screen.",
