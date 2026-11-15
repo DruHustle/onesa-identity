@@ -216,6 +216,31 @@ test("Identity UI changes grant, revocation and suspension at next issuance; res
   assert.equal((await mutate(7, "status", "suspended", "")).status, 303);
   assert.equal((await decision(env.clientId, "")).status, 403);
 });
+test("policy decisions reject active grants whose role is not allowed for that product", async (t) => {
+  const { store, call } = await fixture(t);
+  const user = store.register(env.issuer, "fixture|malformed-farmer-role", "malformed-farmer@onesa.test");
+  store.change("test", user.id, 1, { kind: "status", status: "active" });
+  // Simulate a malformed legacy/manual row that bypassed store.change().
+  store.run(
+    "INSERT INTO grants VALUES(?,?,?,?)",
+    user.id,
+    "farmer",
+    "admin",
+    "active",
+  );
+  const response = await call(
+    "/internal/decision",
+    "POST",
+    JSON.stringify({
+      subject: "fixture|malformed-farmer-role",
+      audience: "https://api.farmer.onesa.eu",
+      client: "farmer-web",
+    }),
+    { authorization: "Bearer " + env.policyKey },
+  );
+  assert.equal(response.status, 403);
+});
+
 test("Portal administrator has no Identity access; stale MFA and forged form denied", async (t) => {
   const { store, call, login } = await fixture(t),
     a = store.register(env.issuer, "oidc|portal", "portal@onesa.test");
@@ -324,6 +349,11 @@ test("Identity administrator bootstrap requires the configured issuer and ignore
       kind: "grant", product: "identity", role: "admin", status: "active",
     });
     store.change("test", previous.id, 3, { kind: "status", status: "suspended" });
+
+    const malformed = store.register(env.issuer, "auth0|malformed-role", "malformed-role@onesa.test");
+    store.change("test", malformed.id, 1, { kind: "status", status: "active" });
+    // A non-admin Identity grant must not block recovery bootstrap.
+    store.run("INSERT INTO grants VALUES(?,?,?,?)", malformed.id, "identity", "viewer", "active");
 
     const replacement = store.register(env.issuer, "auth0|replacement-admin", "replacement@onesa.test");
     bootstrapIdentityAdmin(store, env.issuer, replacement.id, "independent-owner-approval");
