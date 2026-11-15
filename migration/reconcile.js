@@ -89,7 +89,10 @@ function verifyBaselineIntegrity(store, changedIds = new Set()) {
       .sort((a, b) => a.id.localeCompare(b.id));
     check(
       JSON.stringify(actual) === JSON.stringify(expected),
-      "Recovery target has divergent baseline " + inventory.kind + " inventory",
+      "Recovery target has divergent " +
+        (inventory.kind === "link"
+          ? "provider links"
+          : "baseline " + inventory.kind + " inventory"),
     );
   }
 }
