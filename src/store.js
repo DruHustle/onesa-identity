@@ -88,13 +88,31 @@ export function openStore(path) {
     );
   function register(issuer, sub, email, invitation = "") {
     return atomic(() => {
-      const linked = lookup(issuer, sub);
-      if (linked) return linked;
       check(
-        typeof email === "string" && email.length <= 254 && email.includes("@"),
+        typeof email === "string" &&
+          email.length <= 254 &&
+          /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email.trim()),
         "Verified address required",
       );
       const contact = email.trim().toLowerCase();
+      const linked = lookup(issuer, sub);
+      if (linked) {
+        if (linked.email !== contact) {
+          // Only the same verified issuer/subject may refresh its contact
+          // address. An email collision never transfers another account.
+          check(
+            !one("SELECT id FROM accounts WHERE email=? COLLATE NOCASE AND id<>?", contact, linked.id),
+            "Existing account needs ownership verification",
+          );
+          run("UPDATE accounts SET email=?,revision=revision+1 WHERE id=?", contact, linked.id);
+          audit(linked.id, "verified-email-change", linked.id, {
+            previous: linked.email,
+            current: contact,
+            issuer,
+          });
+        }
+        return lookup(issuer, sub);
+      }
       // A legacy address match demands separately verified immutable ownership.
       check(
         !one("SELECT id FROM accounts WHERE email=? COLLATE NOCASE", contact),
