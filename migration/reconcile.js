@@ -64,10 +64,16 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
       ids = new Set();
     let count = 0;
     for (const u of snapshot.accounts) {
+      // A legacy snapshot can contain multiple accounts sharing a case-variant
+      // address. Do not silently import ambiguous contact ownership or an
+      // address that the live registration path would later refuse.
+      const email = typeof u.email === "string" ? u.email.trim().toLowerCase() : "";
       check(
         uuid(u.id) &&
           !ids.has(u.id) &&
-          reference(u.email) &&
+          email.length <= 254 &&
+          /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) &&
+          !store.one("SELECT 1 FROM accounts WHERE email=? COLLATE NOCASE", email) &&
           ["active", "suspended"].includes(u.status),
         "Conflicting account snapshot",
       );
@@ -79,7 +85,7 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
       store.run(
         "INSERT INTO accounts(id,email,status) VALUES(?,?,?)",
         u.id,
-        u.email.toLowerCase(),
+        email,
         u.status,
       );
       if (u.role !== "member")

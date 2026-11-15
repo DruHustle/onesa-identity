@@ -421,6 +421,68 @@ test("OIDC callback preserves a validated invitation destination", async (t) => 
   assert.equal(result.headers.get("location"), "/account?invite=" + invitation);
 });
 
+test("legacy import rejects ambiguous email ownership atomically and normalizes accepted contacts", () => {
+  const store = openStore(":memory:");
+  try {
+    const first = randomUUID(), second = randomUUID();
+    const snapshot = {
+      version: 1,
+      accounts: [
+        { id: first, email: " First@Onesa.Test ", status: "active", role: "member" },
+        { id: second, email: "first@onesa.test", status: "active", role: "member" },
+      ],
+      grants: [], docs: [], registrations: [], drone_memberships: [],
+    };
+    assert.throws(
+      () => applySnapshot(store, "duplicate-contacts", snapshot, [], env.issuer),
+      /Conflicting account snapshot/,
+    );
+    assert.equal(store.one("SELECT count(*) AS n FROM accounts").n, 0);
+    assert.equal(store.one("SELECT count(*) AS n FROM imports").n, 0);
+    assert.equal(store.one("SELECT count(*) AS n FROM audit").n, 0);
+    const existing = store.register(env.issuer, "fixture|existing", "occupied@onesa.test");
+    snapshot.accounts[1].email = "OCCUPIED@onesa.test";
+    assert.throws(
+      () => applySnapshot(store, "existing-contact", snapshot, [], env.issuer),
+      /Conflicting account snapshot/,
+    );
+    assert.deepEqual(store.all("SELECT id FROM accounts").map(row => row.id), [existing.id]);
+    assert.equal(store.one("SELECT count(*) AS n FROM imports").n, 0);
+    snapshot.accounts[1].email = "second@onesa.test";
+    assert.equal(applySnapshot(store, "deduplicated", snapshot, [], env.issuer).accounts, 2);
+    assert.equal(store.one("SELECT email FROM accounts WHERE id=?", first).email, "first@onesa.test");
+    assert.equal(store.one("SELECT email FROM accounts WHERE id=?", second).email, "second@onesa.test");
+  } finally {
+    store.db.close();
+  }
+});
+
+test("legacy import refuses malformed contact addresses without leaving an account", () => {
+  for (const email of [
+    "not-an-email",
+    "missing-domain@example",
+    "embedded space@onesa.test",
+    "x".repeat(250) + "@onesa.test",
+  ]) {
+    const store = openStore(":memory:");
+    try {
+      const snapshot = {
+        version: 1,
+        accounts: [{ id: randomUUID(), email, status: "active", role: "member" }],
+        grants: [], docs: [], registrations: [], drone_memberships: [],
+      };
+      assert.throws(
+        () => applySnapshot(store, "invalid-email", snapshot, [], env.issuer),
+        /Conflicting account snapshot/,
+      );
+      assert.equal(store.one("SELECT count(*) AS n FROM accounts").n, 0);
+      assert.equal(store.one("SELECT count(*) AS n FROM imports").n, 0);
+    } finally {
+      store.db.close();
+    }
+  }
+});
+
 test("provider cancellation retry preserves invitation and restricts return destinations", async (t) => {
   const { call } = await fixture(t);
   const invitation = "b".repeat(43);
