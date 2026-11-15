@@ -583,7 +583,7 @@ test("rollback replay rejects conflicting or malformed account contacts atomical
     assert.equal(restored.lookup(env.issuer, "provider|new"), undefined);
     assert.equal(restored.one("SELECT max(seq) AS seq FROM audit").seq, baseline);
 
-    for (const email of ["Not-An-Email", " NEW@onesa.test ", "new@onesa.test "]) {
+    for (const email of ["Not-An-Email", " NEW@onesa.test ", "new@onesa.test ", "new user@onesa.test", "new@onesa.test\t"]) {
       const malformed = structuredClone(delta);
       malformed.changed[0].account.email = email;
       assert.throws(
