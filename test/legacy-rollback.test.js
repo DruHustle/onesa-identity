@@ -316,7 +316,19 @@ test(
           "SELECT restricted_manifest->'rows' FROM onesa_legacy_rollback_receipts",
         ).includes("fixture|new"),
       );
+      // Replaying a verified rollback must revoke sessions/reset links again:
+      // inventory and credential digests do not cover these ephemeral secrets.
+      query(`INSERT INTO sessions(token_hash,user_id,csrf,expires_at)
+        VALUES('stale-after-replay','${staff}','csrf',now()+interval '1 hour');
+        INSERT INTO recovery_tokens(token_hash,user_id,expires_at)
+        VALUES('reset-after-replay','${staff}',now()+interval '1 hour');`);
+      assert.equal(query(
+        "SELECT (SELECT count(*) FROM sessions)+(SELECT count(*) FROM recovery_tokens)",
+      ), "2");
       runLegacyRollback(plan, { env, apply: true });
+      assert.equal(query(
+        "SELECT (SELECT count(*) FROM sessions)+(SELECT count(*) FROM recovery_tokens)",
+      ), "0", "idempotent recovery must not leave a usable old credential");
       assert.equal(
         query("SELECT COUNT(*) FROM onesa_legacy_rollback_receipts"),
         "1",
