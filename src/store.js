@@ -92,7 +92,7 @@ export function openStore(path) {
       check(
         typeof email === "string" &&
           email.length <= 254 &&
-          /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email.trim()),
+          /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()),
         "Verified address required",
       );
       const contact = email.trim().toLowerCase();
