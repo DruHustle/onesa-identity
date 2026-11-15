@@ -349,6 +349,43 @@ test("Auth0 Action emits audience-limited claims and factor timestamp, fails clo
   }
 });
 
+test("Auth0 Action never sends the policy bearer key to a decorated or non-policy URL", async () => {
+  const original = globalThis.fetch;
+  let requested = false, denied = false;
+  globalThis.fetch = async () => {
+    requested = true;
+    return Response.json({ selfservice: true });
+  };
+  try {
+    const api = { access: { deny: () => (denied = true) } };
+    const base = {
+      client: { client_id: "account-ui" },
+      user: { user_id: "auth0|fixture", email_verified: true },
+      secrets: {
+        POLICY_URL: "https://identity-admin.onesa.test/internal/decision",
+        POLICY_KEY: "controlled-policy-key",
+      },
+    };
+    for (const POLICY_URL of [
+      "http://identity-admin.onesa.test/internal/decision",
+      "https://identity-admin.onesa.test/collect",
+      "https://identity-admin.onesa.test/internal/decision?forward=1",
+      "https://user:pass@identity-admin.onesa.test/internal/decision",
+    ]) {
+      requested = false;
+      denied = false;
+      await action.onExecutePostLogin(
+        { ...base, secrets: { ...base.secrets, POLICY_URL } },
+        api,
+      );
+      assert.equal(denied, true, POLICY_URL);
+      assert.equal(requested, false, POLICY_URL);
+    }
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("password recovery reports provider timeout as 503 without success audit", async (t) => {
   const { store, call, login } = await fixture(t, {
     connection: "Username-Password-Authentication",
