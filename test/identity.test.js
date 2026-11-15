@@ -87,7 +87,7 @@ test("Identity UI changes grant, revocation and suspension at next issuance; res
   // Chromium sends Origin: null for same-origin forms under no-referrer.
   assert.equal(adminPage.headers.get("referrer-policy"), "same-origin");
   const html = await adminPage.text();
-  assert.match(html, /Identity administration/);
+  assert.ok(html.includes('href="/login?invite=' + invitation + '"'));
   const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
   const mutate = (revision, kind, status, assignment) =>
     call(
