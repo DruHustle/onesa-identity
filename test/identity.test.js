@@ -405,3 +405,18 @@ test("verified email change preserves stable user ID, grants, and audit trail", 
   );
   assert.equal(store.lookup(env.issuer, "oidc|stable").email, "new@onesa.test");
 });
+
+test("OIDC callback preserves a validated invitation destination", async (t) => {
+  const { call } = await fixture(t);
+  const invitation = "a".repeat(43);
+  const start = await call("/login?invite=" + invitation);
+  assert.equal(start.status, 303);
+  const params = new URL(start.headers.get("location")).searchParams;
+  const flow = start.headers.getSetCookie()[0].split(";")[0];
+  const result = await call(
+    "/callback?code=controlled&state=" + encodeURIComponent(params.get("state")),
+    "GET", undefined, { cookie: flow },
+  );
+  assert.equal(result.status, 303);
+  assert.equal(result.headers.get("location"), "/account?invite=" + invitation);
+});
