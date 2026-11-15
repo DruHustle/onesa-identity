@@ -439,6 +439,7 @@ test("legacy import rejects ambiguous email ownership atomically and normalizes 
     );
     assert.equal(store.one("SELECT count(*) AS n FROM accounts").n, 0);
     assert.equal(store.one("SELECT count(*) AS n FROM imports").n, 0);
+    assert.equal(store.one("SELECT count(*) AS n FROM audit").n, 0);
     snapshot.accounts[1].email = "second@onesa.test";
     assert.equal(applySnapshot(store, "deduplicated", snapshot, [], env.issuer).accounts, 2);
     assert.equal(store.one("SELECT email FROM accounts WHERE id=?", first).email, "first@onesa.test");
