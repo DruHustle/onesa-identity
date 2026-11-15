@@ -161,7 +161,7 @@ test(
         "pending@example.test",
       );
       identity.invite(admin, "invitee@example.test");
-      const continuity = [staff, admin, suspended, drone].map((id) => ({
+      const continuity = [staff, admin, suspended, drone, docsUser].map((id) => ({
         id,
         receipt: "custodied-dual-proof-" + id,
       }));
@@ -186,6 +186,16 @@ test(
             [{ ...recovery[0], subject: "fixture|another" }],
           ),
         /does not match/,
+      );
+      assert.equal(plan.version, 2);
+      const obsoletePlan = {
+        ...plan,
+        version: 1,
+        rows: plan.rows.map(({ docs_memberships, ...row }) => row),
+      };
+      assert.throws(
+        () => runLegacyRollback(obsoletePlan, { env }),
+        /Unsupported rollback plan/,
       );
       const before = JSON.stringify(snapshot);
       assert.equal(runLegacyRollback(plan, { env }).applied, false);
