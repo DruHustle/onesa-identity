@@ -5,6 +5,9 @@ on:
     branches: [dev, staging, main]
 permissions:
   contents: read
+concurrency:
+  group: verify-identity-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   identity:
     runs-on: ubuntu-24.04

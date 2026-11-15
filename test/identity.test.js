@@ -1,15 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { openStore, digest, products } from "../src/store.js";
 import { createApp } from "../src/web.js";
+import { configuration } from "../src/server.js";
 import {
   applySnapshot,
   replayDelta,
   rollbackDelta,
 } from "../migration/reconcile.js";
 import action from "../auth0/post-login.cjs";
+import stepUp from "../auth0/step-up.cjs";
 import { applyProofs } from "../migration/link-proof.js";
+import { bootstrapIdentityAdmin } from "../migration/identity-admin.js";
 const env = {
   origin: "https://identity-admin.onesa.test",
   issuer: "https://auth.onesa.test/",
@@ -26,20 +34,79 @@ const env = {
     ],
   ]),
 };
+
+test("resource registry rejects missing, non-HTTPS and ambiguous audiences", () => {
+  const base = {
+    OIDC_ISSUER: env.issuer,
+    IDENTITY_ORIGIN: env.origin,
+    OIDC_CLIENT_ID: env.clientId,
+    OIDC_CLIENT_SECRET: "controlled-client-secret",
+    ACTION_POLICY_KEY: "x".repeat(32),
+  };
+  const valid = {
+    "https://api.docs.onesa.eu": {
+      product: "internal-documents",
+      clients: ["docs-web"],
+    },
+  };
+  assert.equal(
+    configuration({
+      ...base,
+      RESOURCE_CLIENTS_JSON: JSON.stringify(valid),
+    }).resources.get("https://api.docs.onesa.eu").product,
+    "internal-documents",
+  );
+  for (const audience of [
+    "",
+    "not-a-url",
+    "http://api.docs.onesa.eu",
+    "https://user:pass@api.docs.onesa.eu",
+    "https://api.docs.onesa.eu?forward=1",
+    "https://api.docs.onesa.eu#fragment",
+  ]) {
+    assert.throws(
+      () =>
+        configuration({
+          ...base,
+          RESOURCE_CLIENTS_JSON: JSON.stringify({
+            [audience]: { product: "farmer", clients: ["farmer-web"] },
+          }),
+        }),
+      /Invalid resource registry/,
+      audience,
+    );
+  }
+  assert.throws(
+    () =>
+      configuration({
+        ...base,
+        RESOURCE_CLIENTS_JSON: JSON.stringify({
+          "https://api.docs.onesa.eu": {
+            product: "farmer",
+            clients: ["farmer-web", "farmer-web"],
+          },
+        }),
+      }),
+    /Invalid resource registry/,
+  );
+});
+
 async function fixture(t, overrides = {}) {
   const store = openStore(":memory:");
   t.after(() => store.db.close());
   let factor = Date.now(),
     subject = "oidc|identity-admin";
+  const defaultRedeem = async () => ({
+    iss: env.issuer,
+    sub: subject,
+    email_verified: true,
+    email: subject.split("|")[1] + "@onesa.test",
+    "https://onesa.eu/claims/mfa_time": Math.floor(factor / 1000),
+  });
+  let redeem = defaultRedeem;
   const fake = {
     authorize: async (p) => env.issuer + "authorize?" + new URLSearchParams(p),
-    redeem: async () => ({
-      iss: env.issuer,
-      sub: subject,
-      email_verified: true,
-      email: subject.split("|")[1] + "@onesa.test",
-      "https://onesa.eu/claims/mfa_time": Math.floor(factor / 1000),
-    }),
+    redeem: (...args) => redeem(...args),
   };
   const app = createApp(store, { ...env, ...overrides }, fake);
   const call = (url, method = "GET", body, headers = {}) =>
@@ -77,7 +144,7 @@ async function fixture(t, overrides = {}) {
     role: "admin",
     status: "active",
   });
-  return { store, call, login, admin };
+  return { store, call, login, admin, setRedeem: (next) => { redeem = next ?? defaultRedeem; } };
 }
 test("Identity UI changes grant, revocation and suspension at next issuance; resources scoped to client/audience", async (t) => {
   const { store, call, login } = await fixture(t),
@@ -149,6 +216,31 @@ test("Identity UI changes grant, revocation and suspension at next issuance; res
   assert.equal((await mutate(7, "status", "suspended", "")).status, 303);
   assert.equal((await decision(env.clientId, "")).status, 403);
 });
+test("policy decisions reject active grants whose role is not allowed for that product", async (t) => {
+  const { store, call } = await fixture(t);
+  const user = store.register(env.issuer, "fixture|malformed-farmer-role", "malformed-farmer@onesa.test");
+  store.change("test", user.id, 1, { kind: "status", status: "active" });
+  // Simulate a malformed legacy/manual row that bypassed store.change().
+  store.run(
+    "INSERT INTO grants VALUES(?,?,?,?)",
+    user.id,
+    "farmer",
+    "admin",
+    "active",
+  );
+  const response = await call(
+    "/internal/decision",
+    "POST",
+    JSON.stringify({
+      subject: "fixture|malformed-farmer-role",
+      audience: "https://api.farmer.onesa.eu",
+      client: "farmer-web",
+    }),
+    { authorization: "Bearer " + env.policyKey },
+  );
+  assert.equal(response.status, 403);
+});
+
 test("Portal administrator has no Identity access; stale MFA and forged form denied", async (t) => {
   const { store, call, login } = await fixture(t),
     a = store.register(env.issuer, "oidc|portal", "portal@onesa.test");
@@ -183,6 +275,117 @@ test("Portal administrator has no Identity access; stale MFA and forged form den
     403,
   );
 });
+test("Identity administration rejects an active grant with any role other than admin", async (t) => {
+  const { store, call } = await fixture(t);
+  const user = store.register(env.issuer, "fixture|malformed-identity-role", "malformed-role@onesa.test");
+  store.change("test", user.id, 1, { kind: "status", status: "active" });
+  // The SQLite table intentionally cannot encode the JavaScript product-role
+  // catalog as a CHECK constraint. Simulate a corrupted or legacy row at the
+  // authorization boundary and prove it cannot confer administrator access.
+  store.run(
+    "INSERT INTO grants VALUES(?,?,?,?)",
+    user.id,
+    "identity",
+    "viewer",
+    "active",
+  );
+  const token = "malformed-identity-role-session";
+  store.run(
+    "INSERT INTO sessions VALUES(?,?,?,?,?)",
+    digest(token),
+    user.id,
+    "csrf",
+    Date.now() + 1800000,
+    Date.now(),
+  );
+  const response = await call("/admin", "GET", undefined, {
+    cookie: "__Host-onesa-session=" + token,
+  });
+  assert.equal(response.status, 403);
+  assert.match(await response.text(), /Identity administrator required/);
+});
+
+test("administrators cannot invite an address already owned by a pending or suspended account", async (t) => {
+  const { store, call, login } = await fixture(t);
+  const pending = store.register(env.issuer, "fixture|pending-existing", "pending-existing@onesa.test");
+  const suspended = store.register(env.issuer, "fixture|suspended-existing", "suspended-existing@onesa.test");
+  store.change("test", suspended.id, 1, { kind: "status", status: "suspended" });
+  const admin = await login("identity-admin");
+  const adminPage = await call("/admin", "GET", undefined, { cookie: admin.cookie });
+  const csrf = (await adminPage.text()).match(/name="csrf" value="([^"]+)"/)[1];
+
+  for (const email of ["PENDING-EXISTING@onesa.test", "SUSPENDED-EXISTING@onesa.test"]) {
+    const response = await call(
+      "/admin/invite",
+      "POST",
+      new URLSearchParams({ csrf, email }),
+      { cookie: admin.cookie, origin: env.origin },
+    );
+    assert.equal(response.status, 409);
+    assert.match(await response.text(), /An account already exists for this address/);
+  }
+  assert.equal(store.one("SELECT count(*) AS n FROM invites").n, 0);
+  assert.equal(store.one("SELECT count(*) AS n FROM audit WHERE action='invite'").n, 0);
+  assert.equal(store.lookup(env.issuer, "fixture|pending-existing").id, pending.id);
+  assert.equal(store.lookup(env.issuer, "fixture|suspended-existing").status, "suspended");
+});
+
+test("Identity administrator bootstrap requires the configured issuer and ignores stale suspended-admin grants", () => {
+  const store = openStore(":memory:");
+  try {
+    const foreign = store.register(
+      "https://attacker.example/",
+      "attacker|admin",
+      "foreign@onesa.test",
+    );
+    assert.throws(
+      () => bootstrapIdentityAdmin(store, env.issuer, foreign.id, "owner-approval"),
+      /configured issuer/,
+    );
+
+    const previous = store.register(env.issuer, "auth0|previous-admin", "previous@onesa.test");
+    store.change("test", previous.id, 1, { kind: "status", status: "active" });
+    store.change("test", previous.id, 2, {
+      kind: "grant", product: "identity", role: "admin", status: "active",
+    });
+    store.change("test", previous.id, 3, { kind: "status", status: "suspended" });
+
+    const malformed = store.register(env.issuer, "auth0|malformed-role", "malformed-role@onesa.test");
+    store.change("test", malformed.id, 1, { kind: "status", status: "active" });
+    // A non-admin Identity grant must not block recovery bootstrap.
+    store.run("INSERT INTO grants VALUES(?,?,?,?)", malformed.id, "identity", "viewer", "active");
+
+    const replacement = store.register(env.issuer, "auth0|replacement-admin", "replacement@onesa.test");
+    bootstrapIdentityAdmin(store, env.issuer, replacement.id, "independent-owner-approval");
+    assert.equal(store.lookup(env.issuer, "auth0|replacement-admin").status, "active");
+    assert.equal(store.activeGrant(replacement.id, "identity").role, "admin");
+    assert.equal(store.activeGrant(previous.id, "identity"), undefined);
+    assert.throws(
+      () => bootstrapIdentityAdmin(store, env.issuer, foreign.id, "second-approval"),
+      /active Identity administrator already exists/,
+    );
+  } finally {
+    store.db.close();
+  }
+});
+
+test("link-proof CLI creates a private SQLite database when run on a protected host", () => {
+  const directory = mkdtempSync(join(tmpdir(), "onesa-identity-link-proof-"));
+  try {
+    const database = join(directory, "identity.sqlite");
+    const manifest = join(directory, "proofs.json");
+    writeFileSync(manifest, "[]", { mode: 0o600 });
+    const script = fileURLToPath(new URL("../migration/link-proof.js", import.meta.url));
+    const result = spawnSync(process.execPath, [script, database, env.issuer, manifest], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(statSync(database).mode & 0o777, 0o600);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("provider subject proof and one-use invitations preserve account separation", async (t) => {
   const { store } = await fixture(t),
     token = store.invite("test", "new@onesa.test");
@@ -255,6 +458,10 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
       assert.equal(s.activeGrant(owner, "pasofi"), undefined);
       assert.equal(s.activeGrant(second, "internal-documents"), undefined);
       assert.equal(s.activeGrant(second, "engineering-documents").role, "viewer");
+      assert.equal(
+        s.one("SELECT count(*) AS n FROM legacy_inventory WHERE kind='docs'").n,
+        1,
+      );
       assert.ok(r.pending.some((x) => x.kind === "review-product-grant"));
       assert.ok(r.pending.some((x) => x.kind === "provider-ownership-proof"));
     }
@@ -297,6 +504,109 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
     y.db.close();
   }
 });
+test("legacy import preserves explicit Portal and Engineering grant decisions over inferred memberships", () => {
+  const store = openStore(":memory:");
+  try {
+    const portalUser = randomUUID(),
+      docsUser = randomUUID(),
+      identityAdmin = randomUUID(),
+      globalAdmin = randomUUID(),
+      explicitAdmin = randomUUID();
+    const snapshot = {
+      version: 1,
+      accounts: [
+        { id: portalUser, email: "portal@onesa.test", status: "active", role: "owner" },
+        { id: docsUser, email: "docs@onesa.test", status: "active", role: "member" },
+        { id: identityAdmin, email: "identity-admin@onesa.test", status: "active", role: "member" },
+        { id: globalAdmin, email: "global-admin@onesa.test", status: "active", role: "administrator" },
+        { id: explicitAdmin, email: "explicit-admin@onesa.test", status: "active", role: "member" },
+      ],
+      grants: [
+        { id: portalUser, product: "portal", role: "editor", status: "active" },
+        { id: docsUser, product: "engineering-documents", role: "viewer", status: "revoked" },
+        { id: identityAdmin, product: "identity", role: "admin", status: "active" },
+        { id: explicitAdmin, product: "portal", role: "administrator", status: "active" },
+      ],
+      docs: [
+        { id: docsUser, membership_id: randomUUID(), enabled: true },
+      ],
+      registrations: [],
+      drone_memberships: [],
+    };
+    applySnapshot(store, "explicit-grants", snapshot, [], env.issuer);
+    assert.equal(store.activeGrant(portalUser, "portal").role, "editor");
+    assert.equal(
+      store.one("SELECT role,status FROM grants WHERE id=? AND product='portal'", portalUser).role,
+      "editor",
+    );
+    assert.equal(
+      store.one("SELECT status FROM grants WHERE id=? AND product='engineering-documents'", docsUser).status,
+      "revoked",
+    );
+    assert.equal(store.activeGrant(docsUser, "engineering-documents"), undefined);
+    assert.equal(store.activeGrant(identityAdmin, "identity"), undefined);
+    assert.equal(store.activeGrant(globalAdmin, "portal"), undefined);
+    assert.equal(
+      store.one("SELECT status FROM grants WHERE id=? AND product='portal'", globalAdmin).status,
+      "pending",
+    );
+    assert.equal(store.activeGrant(explicitAdmin, "portal"), undefined);
+    assert.equal(
+      store.one("SELECT status FROM grants WHERE id=? AND product='portal'", explicitAdmin).status,
+      "pending",
+    );
+    const discrepancies = store.all("SELECT kind,id FROM migration_discrepancies");
+    assert.ok(
+      discrepancies.some(
+        (row) => row.kind === "review-product-grant" && row.id === identityAdmin + "/identity",
+      ),
+    );
+    assert.ok(
+      discrepancies.some(
+        (row) => row.kind === "review-product-grant" && row.id === explicitAdmin + "/portal",
+      ),
+    );
+    assert.ok(
+      discrepancies.some(
+        (row) => row.kind === "legacy-implicit-access" && row.id === globalAdmin,
+      ),
+    );
+  } finally {
+    store.db.close();
+  }
+});
+
+test("Auth0 step-up requires MFA only for explicit browser step-up, never refresh-token exchange", async () => {
+  const requested = "http://schemas.openid.net/pape/policies/2007/06/multi-factor";
+  const calls = [];
+  const api = { multifactor: { enable: (...args) => calls.push(args) } };
+  await stepUp.onExecutePostLogin(
+    { transaction: { protocol: "oidc-basic-profile", acr_values: [requested] } },
+    api,
+  );
+  assert.deepEqual(calls, [["any", { allowRememberBrowser: false }]]);
+
+  calls.length = 0;
+  await stepUp.onExecutePostLogin(
+    { transaction: { protocol: "oidc-basic-profile", acr_values: "openid " + requested } },
+    api,
+  );
+  assert.deepEqual(calls, [["any", { allowRememberBrowser: false }]]);
+
+  calls.length = 0;
+  await stepUp.onExecutePostLogin(
+    { transaction: { protocol: "oauth2-refresh-token", acr_values: [requested] } },
+    api,
+  );
+  assert.deepEqual(calls, []);
+
+  await stepUp.onExecutePostLogin(
+    { transaction: { protocol: "oidc-basic-profile", acr_values: [] } },
+    api,
+  );
+  assert.deepEqual(calls, []);
+});
+
 test("Auth0 Action emits audience-limited claims and factor timestamp, fails closed on network error", async () => {
   const args = {
     client: { client_id: "docs-web" },
@@ -307,6 +617,7 @@ test("Auth0 Action emits audience-limited claims and factor timestamp, fails clo
     user: { user_id: "test", email_verified: true },
     secrets: {
       POLICY_URL: "https://identity-admin.onesa.test/internal/decision",
+      POLICY_ORIGIN: "https://identity-admin.onesa.test",
       POLICY_KEY: "test",
     },
   };
@@ -336,6 +647,62 @@ test("Auth0 Action emits audience-limited claims and factor timestamp, fails clo
     };
     await action.onExecutePostLogin(args, api);
     assert.equal(denied, true);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("Auth0 Action never sends the policy bearer key to a decorated or non-policy URL", async () => {
+  const original = globalThis.fetch;
+  let requested = false, denied = false;
+  globalThis.fetch = async () => {
+    requested = true;
+    return Response.json({ selfservice: true });
+  };
+  try {
+    const api = { access: { deny: () => (denied = true) } };
+    const base = {
+      client: { client_id: "account-ui" },
+      user: { user_id: "auth0|fixture", email_verified: true },
+      secrets: {
+        POLICY_URL: "https://identity-admin.onesa.test/internal/decision",
+        POLICY_ORIGIN: "https://identity-admin.onesa.test",
+        POLICY_KEY: "controlled-policy-key",
+      },
+    };
+    for (const POLICY_URL of [
+      "http://identity-admin.onesa.test/internal/decision",
+      "https://attacker.invalid/internal/decision",
+      "https://identity-admin.onesa.test/collect",
+      "https://identity-admin.onesa.test/internal/decision?forward=1",
+      "https://user:pass@identity-admin.onesa.test/internal/decision",
+    ]) {
+      requested = false;
+      denied = false;
+      await action.onExecutePostLogin(
+        { ...base, secrets: { ...base.secrets, POLICY_URL } },
+        api,
+      );
+      assert.equal(denied, true, POLICY_URL);
+      assert.equal(requested, false, POLICY_URL);
+    }
+    requested = false;
+    denied = false;
+    await action.onExecutePostLogin(
+      { ...base, secrets: { ...base.secrets, POLICY_ORIGIN: "https://attacker.invalid" } },
+      api,
+    );
+    assert.equal(denied, true);
+    assert.equal(requested, false);
+    requested = false;
+    denied = false;
+    const { POLICY_ORIGIN, ...missingOrigin } = base.secrets;
+    await action.onExecutePostLogin(
+      { ...base, secrets: missingOrigin },
+      api,
+    );
+    assert.equal(denied, true);
+    assert.equal(requested, false);
   } finally {
     globalThis.fetch = original;
   }
@@ -432,6 +799,39 @@ test("OIDC callback preserves a validated invitation destination", async (t) => 
   assert.equal(result.headers.get("location"), "/account?invite=" + invitation);
 });
 
+test("legacy import rejects duplicate Engineering membership owners atomically", () => {
+  const store = openStore(":memory:");
+  try {
+    const id = randomUUID();
+    const snapshot = {
+      version: 1,
+      accounts: [
+        { id, email: "engineering@onesa.test", status: "active", role: "member" },
+      ],
+      grants: [],
+      docs: [
+        { id, membership_id: randomUUID(), enabled: true },
+        { id, membership_id: randomUUID(), enabled: false },
+      ],
+      registrations: [],
+      drone_memberships: [],
+    };
+    assert.throws(
+      () => applySnapshot(store, "duplicate-engineering-owner", snapshot, [], env.issuer),
+      /Duplicate Engineering membership owner/,
+    );
+    assert.equal(store.one("SELECT count(*) AS n FROM accounts").n, 0);
+    assert.equal(
+      store.one("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name='legacy_inventory'").n,
+      0,
+    );
+    assert.equal(store.one("SELECT count(*) AS n FROM imports").n, 0);
+    assert.equal(store.one("SELECT count(*) AS n FROM audit").n, 0);
+  } finally {
+    store.db.close();
+  }
+});
+
 test("legacy import rejects ambiguous email ownership atomically and normalizes accepted contacts", () => {
   const store = openStore(":memory:");
   try {
@@ -494,6 +894,81 @@ test("legacy import refuses malformed contact addresses without leaving an accou
   }
 });
 
+test("legacy import rejects unknown Drone tenant roles atomically", () => {
+  const store = openStore(":memory:");
+  try {
+    const id = randomUUID();
+    const snapshot = {
+      version: 1,
+      accounts: [
+        { id, email: "drone-user@onesa.test", status: "active", role: "member" },
+      ],
+      grants: [],
+      docs: [],
+      registrations: [],
+      drone_memberships: [
+        {
+          user_id: id,
+          tenant_id: randomUUID(),
+          role: "superadmin",
+          label: "Unexpected elevated role",
+        },
+      ],
+    };
+    assert.throws(
+      () => applySnapshot(store, "invalid-drone-role", snapshot, [], env.issuer),
+      /Invalid source reference or product role/,
+    );
+    assert.equal(store.one("SELECT count(*) AS n FROM accounts").n, 0);
+    assert.equal(
+      store.one("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name='legacy_inventory'").n,
+      0,
+    );
+    assert.equal(store.one("SELECT count(*) AS n FROM imports").n, 0);
+    assert.equal(store.one("SELECT count(*) AS n FROM audit").n, 0);
+  } finally {
+    store.db.close();
+  }
+});
+
+test("transient OIDC token-exchange failure preserves the one-use invitation for retry", async (t) => {
+  const { call, store, setRedeem } = await fixture(t);
+  const invitation = store.invite("identity-admin", "new-invitee@onesa.test");
+  const start = await call("/register?invite=" + invitation);
+  const params = new URL(start.headers.get("location")).searchParams;
+  const flow = start.headers.getSetCookie()[0].split(";")[0];
+
+  setRedeem(async () => { throw new Error("temporary token endpoint outage"); });
+  const failed = await call(
+    "/callback?code=controlled&state=" + encodeURIComponent(params.get("state")),
+    "GET", undefined, { cookie: flow },
+  );
+  assert.equal(failed.status, 503);
+  assert.ok((await failed.text()).includes('href="/login?invite=' + invitation + '"'));
+  assert.equal(store.one("SELECT count(*) AS n FROM invites").n, 1);
+  assert.equal(store.one("SELECT count(*) AS n FROM accounts WHERE email='identity-admin@onesa.test'").n, 1);
+
+  setRedeem(async () => ({
+    iss: env.issuer,
+    sub: "oidc|new-invitee",
+    email_verified: true,
+    email: "new-invitee@onesa.test",
+  }));
+  const retry = await call("/login?invite=" + invitation);
+  const retryParams = new URL(retry.headers.get("location")).searchParams;
+  const retryFlow = retry.headers.getSetCookie()[0].split(";")[0];
+  const completed = await call(
+    "/callback?code=controlled&state=" + encodeURIComponent(retryParams.get("state")),
+    "GET", undefined, { cookie: retryFlow },
+  );
+  assert.equal(completed.status, 303);
+  assert.equal(completed.headers.get("location"), "/account?invite=" + invitation);
+  assert.equal(store.one("SELECT count(*) AS n FROM invites").n, 0);
+  assert.equal(store.one("SELECT count(*) AS n FROM accounts WHERE email='identity-admin@onesa.test'").n, 1);
+  assert.equal(store.lookup(env.issuer, "oidc|new-invitee").email, "new-invitee@onesa.test");
+  assert.equal(store.lookup(env.issuer, "oidc|new-invitee").status, "pending");
+});
+ 
 test("provider cancellation retry preserves invitation and restricts return destinations", async (t) => {
   const { call } = await fixture(t);
   const invitation = "b".repeat(43);
@@ -658,20 +1133,96 @@ test("first recovery replay rejects altered or extra provider links atomically",
   }
 });
 
+test("first recovery replay rejects unjournaled drift in unchanged cutover accounts and grants", () => {
+  const source = openStore(":memory:");
+  const restored = openStore(":memory:");
+  try {
+    const baselineUser = randomUUID();
+    const changedUser = randomUUID();
+    const snapshot = {
+      version: 1,
+      accounts: [
+        { id: baselineUser, email: "baseline@onesa.test", status: "active", role: "member" },
+        { id: changedUser, email: "changed@onesa.test", status: "active", role: "member" },
+      ],
+      grants: [
+        { id: baselineUser, product: "portal", role: "viewer", status: "active" },
+      ],
+      docs: [],
+      registrations: [],
+      drone_memberships: [],
+    };
+    for (const store of [source, restored])
+      applySnapshot(store, "baseline-integrity", snapshot, [], env.issuer);
+    source.change("test", changedUser, 1, { kind: "status", status: "suspended" });
+    const delta = rollbackDelta(source, "baseline-integrity");
+
+    // A privileged grant altered directly in an unchanged baseline account
+    // has no audit event and is not represented by bundle.changed.
+    restored.run(
+      "UPDATE grants SET role='administrator' WHERE id=? AND product='portal'",
+      baselineUser,
+    );
+    assert.throws(
+      () => replayDelta(restored, delta),
+      /divergent baseline grant inventory/,
+    );
+    assert.equal(restored.one("SELECT status FROM accounts WHERE id=?", changedUser).status, "active");
+    restored.run(
+      "UPDATE grants SET role='viewer' WHERE id=? AND product='portal'",
+      baselineUser,
+    );
+
+    restored.run(
+      "UPDATE accounts SET email='tampered@onesa.test' WHERE id=?",
+      baselineUser,
+    );
+    assert.throws(
+      () => replayDelta(restored, delta),
+      /divergent baseline account inventory/,
+    );
+    assert.equal(restored.one("SELECT status FROM accounts WHERE id=?", changedUser).status, "active");
+    restored.run(
+      "UPDATE accounts SET email='baseline@onesa.test' WHERE id=?",
+      baselineUser,
+    );
+
+    assert.equal(replayDelta(restored, delta).replay, false);
+    assert.equal(restored.one("SELECT status FROM accounts WHERE id=?", changedUser).status, "suspended");
+  } finally {
+    source.db.close();
+    restored.db.close();
+  }
+});
+
 test("idempotent rollback replay also invalidates restored sessions, invites and challenges", () => {
   const source = openStore(":memory:");
   const restored = openStore(":memory:");
   try {
+    const baselineUser = randomUUID();
     const snapshot = {
       version: 1,
-      accounts: [{ id: randomUUID(), email: "original@onesa.test", status: "active", role: "member" }],
-      grants: [], docs: [], registrations: [], drone_memberships: [],
+      accounts: [{ id: baselineUser, email: "original@onesa.test", status: "active", role: "member" }],
+      grants: [{ id: baselineUser, product: "portal", role: "viewer", status: "active" }],
+      docs: [], registrations: [], drone_memberships: [],
     };
     for (const s of [source, restored])
       applySnapshot(s, "recovery-expiry", snapshot, [], env.issuer);
     const newcomer = source.register(env.issuer, "provider|fresh", "fresh@onesa.test");
     const delta = rollbackDelta(source, "recovery-expiry");
     assert.equal(replayDelta(restored, delta).replay, false);
+
+    // Even when the changed-account journal has already been replayed, an
+    // untouched baseline grant must not be able to acquire new privileges.
+    restored.run(
+      "UPDATE grants SET role='administrator' WHERE id=? AND product='portal'",
+      baselineUser,
+    );
+    assert.throws(() => replayDelta(restored, delta), /divergent baseline grant inventory/);
+    restored.run(
+      "UPDATE grants SET role='viewer' WHERE id=? AND product='portal'",
+      baselineUser,
+    );
 
     // An idempotent retry must detect unjournaled data drift, not just the
     // fact that an identical audit sequence has already been applied.

@@ -42,6 +42,13 @@ const redirect = (url, cookies = []) => {
   for (const c of cookies) headers.append("set-cookie", c);
   return new Response(null, { status: 303, headers });
 };
+const retryPath = (destination, origin) => {
+  const target = new URL(destination, origin);
+  const invite = target.searchParams.get("invite");
+  if (invite && /^[A-Za-z0-9_-]{43}$/.test(invite))
+    return "/login?invite=" + encodeURIComponent(invite);
+  return target.pathname === "/admin" ? "/login?return=%2Fadmin" : "/login";
+};
 const hidden = (key, value) =>
   '<input type="hidden" name="' + key + '" value="' + esc(value) + '">';
 const post = (path, csrf, body) =>
@@ -122,7 +129,8 @@ export function createApp(store, env, client = authClient(env)) {
         product = "engineering-documents";
       }
       const grant = store.activeGrant(actor.id, product);
-      if (!grant) return new Response(null, { status: 403 });
+      if (!grant || !products[product]?.includes(grant.role))
+        return new Response(null, { status: 403 });
       return Response.json({
         user_id: actor.id,
         product,
@@ -190,23 +198,25 @@ export function createApp(store, env, client = authClient(env)) {
           400,
         );
       if (url.searchParams.get("error")) {
-        // Preserve the one-use invitation across an IdP cancellation or
-        // temporary provider error. /login only accepts the validated invite
-        // parameter, not an arbitrary return URL.
-        const destination = new URL(flow.destination, env.origin);
-        const invite = destination.searchParams.get("invite");
-        const retry = invite && /^[\w-]{43}$/.test(invite)
-          ? "/login?invite=" + encodeURIComponent(invite)
-          : destination.pathname === "/admin"
-            ? "/login?return=%2Fadmin"
-            : "/login";
         return page(
           "Sign-in unavailable",
-          '<a href="' + retry + '">Try again</a>',
+          '<a href="' + retryPath(flow.destination, env.origin) + '">Try again</a>',
           403,
         );
       }
-      const identity = await client.redeem(url, flow);
+      let identity;
+      try {
+        identity = await client.redeem(url, flow);
+      } catch {
+        // The challenge is one-use and has already been consumed. Preserve a
+        // valid invitation in a safe local retry link if token exchange or
+        // OIDC verification fails transiently.
+        return page(
+          "Sign-in temporarily unavailable",
+          '<a href="' + retryPath(flow.destination, env.origin) + '">Try again</a>',
+          503,
+        );
+      }
       if (
         identity?.iss !== env.issuer ||
         identity.email_verified !== true ||
@@ -215,7 +225,9 @@ export function createApp(store, env, client = authClient(env)) {
       )
         return page(
           "Verify your email",
-          "Use the verification message from Onesa Identity, then sign in again.",
+          'Use the verification message from Onesa Identity, then sign in again. <a href="' +
+            retryPath(flow.destination, env.origin) +
+            '">Continue sign-in</a>',
           403,
         );
       const target = new URL(flow.destination, env.origin);
@@ -344,7 +356,8 @@ export function createApp(store, env, client = authClient(env)) {
     }
     if (!["/admin", "/admin/change", "/admin/invite"].includes(p))
       return page("Page unavailable", "", 404);
-    if (!session || !store.activeGrant(session.id, "identity"))
+    const identityGrant = session && store.activeGrant(session.id, "identity");
+    if (!session || identityGrant?.role !== "admin")
       return page("Identity administrator required", "", 403);
     if (!session.mfa_at || Date.now() - session.mfa_at > 300000)
       return page(

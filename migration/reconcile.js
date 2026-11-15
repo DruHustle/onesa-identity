@@ -20,6 +20,82 @@ function reference(value) {
     typeof value === "string" && value.trim().length > 0 && value.length <= 400
   );
 }
+
+function captureBaseline(store) {
+  store.db.exec(`CREATE TABLE migration_baseline(
+    kind TEXT NOT NULL, id TEXT NOT NULL, record TEXT NOT NULL,
+    PRIMARY KEY(kind,id)
+  )`);
+  const inventories = [
+    ["account", store.all("SELECT * FROM accounts ORDER BY id"), (row) => row.id],
+    ["grant", store.all("SELECT * FROM grants ORDER BY id,product"), (row) => row.id + "/" + row.product],
+    ["link", store.all("SELECT * FROM links ORDER BY issuer,subject"), (row) => digest(row.issuer + "\\0" + row.subject)],
+  ];
+  for (const [kind, rows, key] of inventories)
+    for (const row of rows)
+      store.run(
+        "INSERT INTO migration_baseline VALUES(?,?,?)",
+        kind,
+        key(row),
+        JSON.stringify(canonical(row)),
+      );
+}
+
+// Compare the restored cutover baseline with an inventory captured inside
+// the original import transaction. During an idempotent replay, accounts
+// named by the journal are checked against the delta below; every other
+// account, grant and provider link must still equal the frozen baseline.
+function verifyBaselineIntegrity(store, changedIds = new Set()) {
+  check(
+    store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_baseline'"),
+    "Recovery target has no cutover integrity inventory; rebuild it from the protected source snapshot",
+  );
+  const inventories = [
+    {
+      kind: "account",
+      rows: () => store.all("SELECT * FROM accounts ORDER BY id"),
+      key: (row) => row.id,
+      owner: (row) => row.id,
+    },
+    {
+      kind: "grant",
+      rows: () => store.all("SELECT * FROM grants ORDER BY id,product"),
+      key: (row) => row.id + "/" + row.product,
+      owner: (row) => row.id,
+    },
+    {
+      kind: "link",
+      rows: () => store.all("SELECT * FROM links ORDER BY issuer,subject"),
+      key: (row) => digest(row.issuer + "\\0" + row.subject),
+      owner: (row) => row.id,
+    },
+  ];
+  for (const inventory of inventories) {
+    const expected = store
+      .all("SELECT id,record FROM migration_baseline WHERE kind=?", inventory.kind)
+      .filter((entry) => !changedIds.has(JSON.parse(entry.record).id))
+      .map((entry) => ({
+        id: entry.id,
+        record: JSON.stringify(canonical(JSON.parse(entry.record))),
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const actual = inventory
+      .rows()
+      .filter((row) => !changedIds.has(inventory.owner(row)))
+      .map((row) => ({
+        id: inventory.key(row),
+        record: JSON.stringify(canonical(row)),
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    check(
+      JSON.stringify(actual) === JSON.stringify(expected),
+      "Recovery target has divergent " +
+        (inventory.kind === "link"
+          ? "provider links"
+          : "baseline " + inventory.kind + " inventory"),
+    );
+  }
+}
 export function applySnapshot(store, key, snapshot, proofs, issuer) {
   check(
     reference(key) &&
@@ -48,6 +124,10 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         prior.digest === fingerprint,
         "Snapshot key reused with different data",
       );
+      check(
+        store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_baseline'"),
+        "Cutover predates recovery integrity inventory; rebuild it from the protected source snapshot",
+      );
       return {
         replay: true,
         watermark: prior.watermark,
@@ -61,7 +141,12 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
       "Additional source snapshots require explicit reconciliation",
     );
     const pending = [],
-      ids = new Set();
+      ids = new Set(),
+      explicitPortalGrants = new Set(
+        snapshot.grants
+          .filter((g) => g?.product === "portal")
+          .map((g) => g.id),
+      );
     let count = 0;
     for (const u of snapshot.accounts) {
       // A legacy snapshot can contain multiple accounts sharing a case-variant
@@ -88,17 +173,19 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         email,
         u.status,
       );
-      if (u.role !== "member")
+      if (u.role !== "member" && !explicitPortalGrants.has(u.id))
         store.run(
           "INSERT INTO grants VALUES(?,?,?,?)",
           u.id,
           "portal",
           u.role,
-          "active",
+          ["owner", "administrator"].includes(u.role) ? "pending" : "active",
         );
       // Old global-admin and implicit Farmer rights require an explicit resource-owner disposition.
       if (u.role !== "member")
         pending.push({ kind: "legacy-implicit-access", id: u.id });
+      if (["owner", "administrator"].includes(u.role))
+        pending.push({ kind: "review-product-grant", id: u.id + "/portal" });
     }
     function grant(row) {
       check(
@@ -116,27 +203,62 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
       );
     }
     for (const g of snapshot.grants) {
-      if ((g.product === "pasofi" && g.role !== "customer") || g.product === "internal-documents") {
-        // The Portal export alone cannot prove staff duties or access to other document domains.
-        pending.push({kind: "review-product-grant", id: g.id + "/" + g.product});
-      } else grant(g);
+      if (
+        (g.product === "pasofi" && g.role !== "customer") ||
+        g.product === "internal-documents" ||
+        g.product === "identity"
+      ) {
+        // A Portal export cannot prove staff duties, Identity administration,
+        // or access to separately owned document domains.
+        pending.push({ kind: "review-product-grant", id: g.id + "/" + g.product });
+      } else if (
+        g.product === "portal" &&
+        ["owner", "administrator"].includes(g.role)
+      ) {
+        // Legacy global Portal roles require an explicit owner review before
+        // they can become active product access.
+        pending.push({ kind: "review-product-grant", id: g.id + "/portal" });
+        grant({ ...g, status: g.status === "active" ? "pending" : g.status });
+      } else {
+        grant(g);
+      }
     }
+    // The Portal schema enforces one Engineering membership per Identity
+    // account. Reject a corrupted or ambiguous export instead of allowing
+    // duplicate ownership to alter the account-level product entitlement.
+    const engineeringAccess = new Map();
     for (const d of snapshot.docs) {
       check(
         uuid(d.membership_id) && typeof d.enabled === "boolean",
         "Invalid document membership",
       );
-      if (d.id)
-        grant({
-          id: d.id,
-          product: "engineering-documents",
-          role: "viewer",
-          status: d.enabled ? "active" : "revoked",
-        });
-      else
+      if (d.id !== null && d.id !== undefined) {
+        check(
+          ids.has(d.id) && !engineeringAccess.has(d.id),
+          "Duplicate Engineering membership owner",
+        );
+        engineeringAccess.set(d.id, d.enabled);
+      } else {
         pending.push({
           kind: "unlinked-document-membership",
           id: d.membership_id,
+        });
+      }
+    }
+    for (const [id, enabled] of engineeringAccess) {
+      // An explicit managed grant (including a pending or revoked decision)
+      // takes precedence over the entitlement inferred from legacy membership.
+      if (
+        !store.one(
+          "SELECT 1 FROM grants WHERE id=? AND product='engineering-documents'",
+          id,
+        )
+      )
+        grant({
+          id,
+          product: "engineering-documents",
+          role: "viewer",
+          status: enabled ? "active" : "revoked",
         });
     }
     store.db.exec(
@@ -162,9 +284,9 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
           kind === "grant"
             ? ids.has(row.id)
             : kind === "drone"
-              ? ids.has(row.user_id) && uuid(row.tenant_id)
+              ? ids.has(row.user_id) && uuid(row.tenant_id) && products.drone.includes(row.role)
               : uuid(id),
-          "Invalid source reference",
+          "Invalid source reference or product role",
         );
         store.run(
           "INSERT INTO legacy_inventory VALUES(?,?,?)",
@@ -214,6 +336,7 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         item.kind,
         item.id,
       );
+    captureBaseline(store);
     store.audit("migration", "snapshot", null, {
       key,
       fingerprint,
@@ -288,6 +411,7 @@ export function replayDelta(store, bundle) {
       "SELECT * FROM audit WHERE seq>? ORDER BY seq",
       source.watermark,
     );
+    verifyBaselineIntegrity(store, existing.length ? new Set(actual) : new Set());
     if (existing.length) {
       check(
         JSON.stringify(existing) === JSON.stringify(bundle.events),

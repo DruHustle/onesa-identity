@@ -200,7 +200,12 @@ export function prepareLegacyRollback(
         report("contact-change-requires-independent-verification");
       const portal = index.get("portal");
       let role = portal?.status === "active" ? portal.role : "member";
-      if (["owner", "administrator"].includes(role)) {
+      if (
+        ["owner", "administrator"].includes(source?.role) ||
+        ["owner", "administrator"].includes(portal?.role)
+      ) {
+        // Preserve the separately managed Portal grant for review, but never
+        // restore the legacy account-wide owner/administrator role.
         role = "member";
         report("portal-administrator-would-grant-global-access");
       }
@@ -216,20 +221,30 @@ export function prepareLegacyRollback(
       // Legacy verified Portal staff inherit Farmer without an explicit decision.
       if (role !== "member" && !access.some((g) => g.product === "farmer"))
         access.push({ product: "farmer", role: "user", status: "revoked" });
-      const membership = snapshot.docs.find((d) => d.id === id);
+      const memberships = snapshot.docs.filter((d) => d.id === id);
       const oldDocs = index.get("engineering-documents"),
         canonical = index.get("internal-documents");
       const docGrant = oldDocs?.status === "active";
-      const docs = Boolean(
+      const docsAllowed = Boolean(
         enabled &&
-        membership?.enabled &&
         docGrant &&
         oldDocs.role === "viewer" &&
-        (!canonical || canonical.status === "active"),
+        (!canonical || canonical.status === "active") &&
+        !recovery,
       );
-      if (recovery && docGrant && membership?.enabled)
+      // Keep the decision per legacy membership ID. Collapsing these into
+      // one account-level boolean can accidentally enable a disabled
+      // membership (or disable a separate enabled one) during rollback.
+      const docsMemberships = memberships.map((membership) => ({
+        membership_id: membership.membership_id,
+        enabled: docsAllowed && membership.enabled,
+      }));
+      if (recovery && docGrant && memberships.some((m) => m.enabled))
         report("engineering-credential-reverification-required");
-      if (docGrant && (!membership?.enabled || oldDocs.role !== "viewer"))
+      if (
+        docGrant &&
+        (!memberships.some((m) => m.enabled) || oldDocs.role !== "viewer")
+      )
         report("engineering-membership-needs-document-owner");
       if (docGrant && canonical && canonical.status !== "active")
         report("legacy-engineering-suppressed-by-canonical-decision");
@@ -258,7 +273,8 @@ export function prepareLegacyRollback(
         enabled,
         role,
         access,
-        docs: docs && enabled && !recovery,
+        docs_memberships: docsMemberships,
+        docs: docsMemberships.some((membership) => membership.enabled),
       };
     });
     for (const d of snapshot.docs)
@@ -270,7 +286,7 @@ export function prepareLegacyRollback(
     if (events.some((e) => e.action === "invite"))
       issues.push({ id: null, reason: "reissue-outstanding-invitations" });
     return {
-      version: 1,
+      version: 2,
       key,
       fingerprint,
       watermark: baseline.watermark,
@@ -311,6 +327,14 @@ export function runLegacyRollback(
   plan,
   { apply = false, env = process.env } = {},
 ) {
+  // Version 2 carries a per-membership decision. Never apply an older
+  // account-wide docs boolean, which can re-enable a disabled sibling record.
+  requireState(
+    plan?.version === 2 &&
+      Array.isArray(plan.rows) &&
+      plan.rows.every((row) => Array.isArray(row.docs_memberships)),
+    "Unsupported rollback plan; regenerate it with the current Identity code",
+  );
   const input = sqlJson(plan);
   const hash = digest(json(plan));
   const sql = `\\set ON_ERROR_STOP on
@@ -383,8 +407,12 @@ BEGIN
        ON CONFLICT(user_id,product) DO UPDATE SET role=excluded.role,status=excluded.status,revision=t.revision+1,updated_at=now(),reviewed_by=NULL
        WHERE (t.role,t.status) IS DISTINCT FROM (excluded.role,excluded.status);
    END LOOP;
-   UPDATE public.engineering_memberships m SET enabled=(x->>'docs')::boolean,revision=m.revision+1
-     FROM public.identity_engineering_links l WHERE l.user_id=uid AND m.id=l.membership_id AND m.enabled IS DISTINCT FROM (x->>'docs')::boolean;
+   FOR g IN SELECT value FROM jsonb_array_elements(coalesce(x->'docs_memberships','[]'::jsonb)) LOOP
+     UPDATE public.engineering_memberships m
+       SET enabled=(g->>'enabled')::boolean,revision=m.revision+1
+       WHERE m.id=(g->>'membership_id')::uuid
+         AND m.enabled IS DISTINCT FROM (g->>'enabled')::boolean;
+   END LOOP;
  END LOOP;
  UPDATE public.engineering_memberships m SET enabled=false,revision=m.revision+1
  WHERE enabled AND NOT EXISTS(SELECT 1 FROM public.identity_engineering_links l WHERE l.membership_id=m.id);

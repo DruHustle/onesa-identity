@@ -3,12 +3,36 @@
 exports.onExecutePostLogin = async (event, api) => {
   const deny = () =>
     api.access.deny("Onesa access is unavailable for this application.");
-  const { POLICY_URL, POLICY_KEY } = event.secrets;
-  if (!POLICY_URL || !POLICY_KEY || !event.user.email_verified) return deny();
+  const { POLICY_URL, POLICY_ORIGIN, POLICY_KEY } = event.secrets || {};
+  if (
+    !POLICY_URL ||
+    !POLICY_ORIGIN ||
+    !POLICY_KEY ||
+    event.user?.email_verified !== true
+  )
+    return deny();
   let decision;
   try {
     const url = new URL(POLICY_URL);
-    if (url.protocol !== "https:") return deny();
+    const origin = new URL(POLICY_ORIGIN);
+    // POLICY_KEY is a bearer credential. Require a separately configured,
+    // canonical HTTPS origin as well as the one exact endpoint; a path-only
+    // check would still leak the key if POLICY_URL named an attacker host.
+    if (
+      origin.protocol !== "https:" ||
+      origin.username ||
+      origin.password ||
+      origin.pathname !== "/" ||
+      origin.search ||
+      origin.hash ||
+      url.origin !== origin.origin ||
+      url.pathname !== "/internal/decision" ||
+      url.search ||
+      url.hash ||
+      url.username ||
+      url.password
+    )
+      return deny();
     const result = await fetch(url, {
       method: "POST",
       redirect: "error",

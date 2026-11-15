@@ -63,12 +63,18 @@ if (
   process.argv[1] &&
   pathToFileURL(process.argv[1]).href === import.meta.url
 ) {
-  const [file, issuer, manifest] = process.argv.slice(2),
-    store = openStore(file);
-  console.log(
-    JSON.stringify({
-      added: applyProofs(store, issuer, JSON.parse(readFileSync(manifest))),
-    }),
-  );
-  store.db.close();
+  process.umask(0o077);
+  const [file, issuer, manifest] = process.argv.slice(2);
+  if (!file || !issuer || !manifest)
+    throw Error("Usage: node migration/link-proof.js DATABASE HTTPS_ISSUER PROOFS.json");
+  const store = openStore(file);
+  try {
+    console.log(
+      JSON.stringify({
+        added: applyProofs(store, issuer, JSON.parse(readFileSync(manifest))),
+      }),
+    );
+  } finally {
+    store.db.close();
+  }
 }

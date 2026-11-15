@@ -74,7 +74,9 @@ test(
     );
     query(`INSERT INTO identity_product_access(user_id,product,role,status) VALUES('${staff}','robot','operator','active'),('${suspended}','ai','user','active'),('${drone}','drone','admin','active');
     INSERT INTO identity_drone_memberships VALUES('${drone}','${tenant}','operator','Tenant');
-    INSERT INTO engineering_memberships(id,email,enabled,access_policy_evidence,approved_by) VALUES('${member}','u0@example.test',true,'legacy-approval','${admin}'),('${unrelated}','orphan@example.test',true,'unlinked','${admin}');
+    INSERT INTO engineering_memberships(id,email,enabled,access_policy_evidence,approved_by) VALUES
+      ('${member}','u0@example.test',true,'legacy-approval','${admin}'),
+      ('${unrelated}','orphan@example.test',true,'unlinked','${admin}');
     INSERT INTO identity_engineering_links(membership_id,user_id) VALUES('${member}','${staff}');
     INSERT INTO access_registrations(id,email,audience,display_name,state,reviewed_by) VALUES('${approval}','u0@example.test','engineering','Existing','approved','${admin}');
     INSERT INTO engineering_enrollment_accounts VALUES('${approval}','${staff}');
@@ -176,6 +178,20 @@ test(
             [{ ...recovery[0], subject: "fixture|another" }],
           ),
         /does not match/,
+      );
+      assert.equal(plan.version, 2);
+      assert.deepEqual(
+        plan.rows.find((row) => row.account.id === staff).docs_memberships,
+        [{ membership_id: member, enabled: false }],
+      );
+      const obsoletePlan = {
+        ...plan,
+        version: 1,
+        rows: plan.rows.map(({ docs_memberships, ...row }) => row),
+      };
+      assert.throws(
+        () => runLegacyRollback(obsoletePlan, { env }),
+        /Unsupported rollback plan/,
       );
       const before = JSON.stringify(snapshot);
       assert.equal(runLegacyRollback(plan, { env }).applied, false);
@@ -280,6 +296,14 @@ test(
       assert.equal(
         query("SELECT count(*) FROM engineering_memberships WHERE enabled"),
         "0",
+      );
+      assert.equal(
+        query(`SELECT enabled FROM engineering_memberships WHERE id='${member}'`),
+        "f",
+      );
+      assert.equal(
+        query(`SELECT enabled FROM engineering_memberships WHERE id='${unrelated}'`),
+        "f",
       );
       assert.equal(
         query(`SELECT state FROM access_registrations WHERE id='${approval}'`),
