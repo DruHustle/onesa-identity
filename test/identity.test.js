@@ -502,6 +502,40 @@ test("legacy import refuses malformed contact addresses without leaving an accou
   }
 });
 
+test("legacy import rejects unknown Drone tenant roles atomically", () => {
+  const store = openStore(":memory:");
+  try {
+    const id = randomUUID();
+    const snapshot = {
+      version: 1,
+      accounts: [
+        { id, email: "drone-user@onesa.test", status: "active", role: "member" },
+      ],
+      grants: [],
+      docs: [],
+      registrations: [],
+      drone_memberships: [
+        {
+          user_id: id,
+          tenant_id: randomUUID(),
+          role: "superadmin",
+          label: "Unexpected elevated role",
+        },
+      ],
+    };
+    assert.throws(
+      () => applySnapshot(store, "invalid-drone-role", snapshot, [], env.issuer),
+      /Invalid source reference or product role/,
+    );
+    assert.equal(store.one("SELECT count(*) AS n FROM accounts").n, 0);
+    assert.equal(store.one("SELECT count(*) AS n FROM legacy_inventory").n, 0);
+    assert.equal(store.one("SELECT count(*) AS n FROM imports").n, 0);
+    assert.equal(store.one("SELECT count(*) AS n FROM audit").n, 0);
+  } finally {
+    store.db.close();
+  }
+});
+
 test("provider cancellation retry preserves invitation and restricts return destinations", async (t) => {
   const { call } = await fixture(t);
   const invitation = "b".repeat(43);
