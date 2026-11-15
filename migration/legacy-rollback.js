@@ -200,7 +200,12 @@ export function prepareLegacyRollback(
         report("contact-change-requires-independent-verification");
       const portal = index.get("portal");
       let role = portal?.status === "active" ? portal.role : "member";
-      if (["owner", "administrator"].includes(role)) {
+      if (
+        ["owner", "administrator"].includes(source?.role) ||
+        ["owner", "administrator"].includes(portal?.role)
+      ) {
+        // Preserve the separately managed Portal grant for review, but never
+        // restore the legacy account-wide owner/administrator role.
         role = "member";
         report("portal-administrator-would-grant-global-access");
       }
