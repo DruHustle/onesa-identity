@@ -242,6 +242,22 @@ function clearResolvedProofs(store) {
     )`);
 }
 
+// Recovery must not silently preserve an extra provider identity or stale
+// ownership receipt from the restored target. A successful replay must have
+// precisely the provider links recorded by the frozen source.
+function verifyRecoveredLinks(store, changed) {
+  const links = store.all(
+    "SELECT * FROM links WHERE id=? ORDER BY issuer,subject",
+    changed.account.id,
+  );
+  const expectedLinks = [...changed.links].sort(
+    (a, b) => a.issuer.localeCompare(b.issuer) || a.subject.localeCompare(b.subject),
+  );
+  check(
+    JSON.stringify(links) === JSON.stringify(expectedLinks),
+    "Recovery target has divergent provider links",
+  );
+}
 // Bring a separately restored baseline forward to a frozen cutover watermark.
 export function replayDelta(store, bundle) {
   return store.atomic(() => {
@@ -292,15 +308,7 @@ export function replayDelta(store, bundle) {
             JSON.stringify(x.account),
           "Recovery target has divergent account state",
         );
-        const links = store.all(
-          "SELECT * FROM links WHERE id=? ORDER BY issuer,subject",
-          x.account.id,
-        );
-        const expectedLinks = [...x.links].sort(
-          (a, b) => a.issuer.localeCompare(b.issuer) || a.subject.localeCompare(b.subject),
-        );
-        check(JSON.stringify(links) === JSON.stringify(expectedLinks),
-          "Recovery target has divergent provider links");
+        verifyRecoveredLinks(store, x);
         const grants = store.all(
           "SELECT * FROM grants WHERE id=? ORDER BY product",
           x.account.id,
@@ -367,6 +375,9 @@ export function replayDelta(store, bundle) {
         );
       }
     }
+    // Initial replay must also detect extra or altered provider links left
+    // behind by a restored database. Never keep unverified login ownership.
+    for (const x of bundle.changed) verifyRecoveredLinks(store, x);
     // The baseline and the delta must retain unique canonical contacts, even
     // when a protected recovery bundle is corrupted or supplied out of order.
     // Check the final transactional state so two legitimate email swaps are

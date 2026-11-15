@@ -603,6 +603,61 @@ test("rollback replay rejects conflicting or malformed account contacts atomical
   }
 });
 
+test("first recovery replay rejects altered or extra provider links atomically", () => {
+  const source = openStore(":memory:");
+  const restored = openStore(":memory:");
+  try {
+    const id = randomUUID();
+    const snapshot = {
+      version: 1,
+      accounts: [{ id, email: "verified@onesa.test", status: "active", role: "member" }],
+      grants: [], docs: [], registrations: [], drone_memberships: [],
+    };
+    const proof = [{
+      id, issuer: env.issuer, subject: "provider|verified",
+      method: "dual-authentication", receipt: "independently-verified-receipt",
+    }];
+    for (const store of [source, restored])
+      applySnapshot(store, "verified-link-recovery", snapshot, proof, env.issuer);
+    source.change("test", id, 1, { kind: "status", status: "suspended" });
+    const delta = rollbackDelta(source, "verified-link-recovery");
+    const baseline = restored.one("SELECT max(seq) AS seq FROM audit").seq;
+    const evidence = restored.one("SELECT evidence FROM links WHERE id=?", id).evidence;
+
+    // Previously initial replay returned success even when a restored link
+    // retained different ownership evidence from the recovered source.
+    restored.run("UPDATE links SET evidence='unverified' WHERE id=?", id);
+    assert.throws(
+      () => replayDelta(restored, delta),
+      /Recovery target has divergent provider links/,
+    );
+    assert.equal(restored.one("SELECT status FROM accounts WHERE id=?", id).status, "active");
+    assert.equal(restored.one("SELECT max(seq) AS seq FROM audit").seq, baseline);
+    restored.run("UPDATE links SET evidence=? WHERE id=?", evidence, id);
+
+    // A second, unauthorized provider identity must not survive failover.
+    restored.run(
+      "INSERT INTO links VALUES(?,?,?,?)",
+      "https://foreign-provider.invalid/", "provider|forged", id, "unverified",
+    );
+    assert.throws(
+      () => replayDelta(restored, delta),
+      /Recovery target has divergent provider links/,
+    );
+    assert.equal(restored.one("SELECT status FROM accounts WHERE id=?", id).status, "active");
+    assert.equal(restored.one("SELECT max(seq) AS seq FROM audit").seq, baseline);
+    restored.run("DELETE FROM links WHERE issuer=?", "https://foreign-provider.invalid/");
+
+    assert.equal(replayDelta(restored, delta).replay, false);
+    assert.equal(restored.lookup(env.issuer, "provider|verified").status, "suspended");
+    assert.deepEqual(restored.all("SELECT * FROM links WHERE id=?", id),
+      source.all("SELECT * FROM links WHERE id=?", id));
+  } finally {
+    source.db.close();
+    restored.db.close();
+  }
+});
+
 test("idempotent rollback replay also invalidates restored sessions, invites and challenges", () => {
   const source = openStore(":memory:");
   const restored = openStore(":memory:");
