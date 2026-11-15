@@ -9,6 +9,12 @@ on:
       - "auth0/**"
       - "package.json"
       - "package-lock.json"
+      - "README.md"
+      - ".env.example"
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".gitignore"
+      - ".github/workflows/check.yml"
       - ".github/workflows/identity-checks.yml"
   push:
     branches: [dev, staging, main]
