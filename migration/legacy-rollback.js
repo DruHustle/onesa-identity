@@ -281,7 +281,7 @@ export function prepareLegacyRollback(
     if (events.some((e) => e.action === "invite"))
       issues.push({ id: null, reason: "reissue-outstanding-invitations" });
     return {
-      version: 1,
+      version: 2,
       key,
       fingerprint,
       watermark: baseline.watermark,
@@ -322,6 +322,14 @@ export function runLegacyRollback(
   plan,
   { apply = false, env = process.env } = {},
 ) {
+  // Version 2 carries a per-membership decision. Never apply an older
+  // account-wide docs boolean, which can re-enable a disabled sibling record.
+  requireState(
+    plan?.version === 2 &&
+      Array.isArray(plan.rows) &&
+      plan.rows.every((row) => Array.isArray(row.docs_memberships)),
+    "Unsupported rollback plan; regenerate it with the current Identity code",
+  );
   const input = sqlJson(plan);
   const hash = digest(json(plan));
   const sql = `\\set ON_ERROR_STOP on
