@@ -451,5 +451,5 @@ test("provider cancellation retry preserves invitation and restricts return dest
     "/callback?error=access_denied&state=" + encodeURIComponent(maliciousParams.get("state")),
     "GET", undefined, { cookie: maliciousFlow },
   );
-  assert.match(await denied.text(), /href="\\/login"/);
+  assert.ok((await denied.text()).includes('href="/login"'));
 });
