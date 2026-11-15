@@ -241,6 +241,31 @@ test("Portal administrator has no Identity access; stale MFA and forged form den
     403,
   );
 });
+test("administrators cannot invite an address already owned by a pending or suspended account", async (t) => {
+  const { store, call, login } = await fixture(t);
+  const pending = store.register(env.issuer, "fixture|pending-existing", "pending-existing@onesa.test");
+  const suspended = store.register(env.issuer, "fixture|suspended-existing", "suspended-existing@onesa.test");
+  store.change("test", suspended.id, 1, { kind: "status", status: "suspended" });
+  const admin = await login("identity-admin");
+  const adminPage = await call("/admin", "GET", undefined, { cookie: admin.cookie });
+  const csrf = (await adminPage.text()).match(/name="csrf" value="([^"]+)"/)[1];
+
+  for (const email of ["PENDING-EXISTING@onesa.test", "SUSPENDED-EXISTING@onesa.test"]) {
+    const response = await call(
+      "/admin/invite",
+      "POST",
+      new URLSearchParams({ csrf, email }),
+      { cookie: admin.cookie, origin: env.origin },
+    );
+    assert.equal(response.status, 409);
+    assert.match(await response.text(), /An account already exists for this address/);
+  }
+  assert.equal(store.one("SELECT count(*) AS n FROM invites").n, 0);
+  assert.equal(store.one("SELECT count(*) AS n FROM audit WHERE action='invite'").n, 0);
+  assert.equal(store.lookup(env.issuer, "fixture|pending-existing").id, pending.id);
+  assert.equal(store.lookup(env.issuer, "fixture|suspended-existing").status, "suspended");
+});
+
 test("provider subject proof and one-use invitations preserve account separation", async (t) => {
   const { store } = await fixture(t),
     token = store.invite("test", "new@onesa.test");
