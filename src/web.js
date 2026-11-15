@@ -232,7 +232,7 @@ export function createApp(store, env, client = authClient(env)) {
         now + 1800000,
         factor,
       );
-      return redirect(target.pathname, [
+      return redirect(target.pathname + target.search, [
         cookie("session", session, 1800),
         cookie("flow", "", 0),
       ]);
