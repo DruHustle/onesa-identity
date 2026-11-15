@@ -1073,20 +1073,96 @@ test("first recovery replay rejects altered or extra provider links atomically",
   }
 });
 
+test("first recovery replay rejects unjournaled drift in unchanged cutover accounts and grants", () => {
+  const source = openStore(":memory:");
+  const restored = openStore(":memory:");
+  try {
+    const baselineUser = randomUUID();
+    const changedUser = randomUUID();
+    const snapshot = {
+      version: 1,
+      accounts: [
+        { id: baselineUser, email: "baseline@onesa.test", status: "active", role: "member" },
+        { id: changedUser, email: "changed@onesa.test", status: "active", role: "member" },
+      ],
+      grants: [
+        { id: baselineUser, product: "portal", role: "viewer", status: "active" },
+      ],
+      docs: [],
+      registrations: [],
+      drone_memberships: [],
+    };
+    for (const store of [source, restored])
+      applySnapshot(store, "baseline-integrity", snapshot, [], env.issuer);
+    source.change("test", changedUser, 1, { kind: "status", status: "suspended" });
+    const delta = rollbackDelta(source, "baseline-integrity");
+
+    // A privileged grant altered directly in an unchanged baseline account
+    // has no audit event and is not represented by bundle.changed.
+    restored.run(
+      "UPDATE grants SET role='administrator' WHERE id=? AND product='portal'",
+      baselineUser,
+    );
+    assert.throws(
+      () => replayDelta(restored, delta),
+      /divergent baseline grant inventory/,
+    );
+    assert.equal(restored.one("SELECT status FROM accounts WHERE id=?", changedUser).status, "active");
+    restored.run(
+      "UPDATE grants SET role='viewer' WHERE id=? AND product='portal'",
+      baselineUser,
+    );
+
+    restored.run(
+      "UPDATE accounts SET email='tampered@onesa.test' WHERE id=?",
+      baselineUser,
+    );
+    assert.throws(
+      () => replayDelta(restored, delta),
+      /divergent baseline account inventory/,
+    );
+    assert.equal(restored.one("SELECT status FROM accounts WHERE id=?", changedUser).status, "active");
+    restored.run(
+      "UPDATE accounts SET email='baseline@onesa.test' WHERE id=?",
+      baselineUser,
+    );
+
+    assert.equal(replayDelta(restored, delta).replay, false);
+    assert.equal(restored.one("SELECT status FROM accounts WHERE id=?", changedUser).status, "suspended");
+  } finally {
+    source.db.close();
+    restored.db.close();
+  }
+});
+
 test("idempotent rollback replay also invalidates restored sessions, invites and challenges", () => {
   const source = openStore(":memory:");
   const restored = openStore(":memory:");
   try {
+    const baselineUser = randomUUID();
     const snapshot = {
       version: 1,
-      accounts: [{ id: randomUUID(), email: "original@onesa.test", status: "active", role: "member" }],
-      grants: [], docs: [], registrations: [], drone_memberships: [],
+      accounts: [{ id: baselineUser, email: "original@onesa.test", status: "active", role: "member" }],
+      grants: [{ id: baselineUser, product: "portal", role: "viewer", status: "active" }],
+      docs: [], registrations: [], drone_memberships: [],
     };
     for (const s of [source, restored])
       applySnapshot(s, "recovery-expiry", snapshot, [], env.issuer);
     const newcomer = source.register(env.issuer, "provider|fresh", "fresh@onesa.test");
     const delta = rollbackDelta(source, "recovery-expiry");
     assert.equal(replayDelta(restored, delta).replay, false);
+
+    // Even when the changed-account journal has already been replayed, an
+    // untouched baseline grant must not be able to acquire new privileges.
+    restored.run(
+      "UPDATE grants SET role='administrator' WHERE id=? AND product='portal'",
+      baselineUser,
+    );
+    assert.throws(() => replayDelta(restored, delta), /divergent baseline grant inventory/);
+    restored.run(
+      "UPDATE grants SET role='viewer' WHERE id=? AND product='portal'",
+      baselineUser,
+    );
 
     // An idempotent retry must detect unjournaled data drift, not just the
     // fact that an identical audit sequence has already been applied.
