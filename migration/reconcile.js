@@ -510,16 +510,25 @@ export function replayDelta(store, bundle) {
       !store.one("SELECT 1 FROM accounts GROUP BY email COLLATE NOCASE HAVING count(*)>1 LIMIT 1"),
       "Conflicting recovered contact ownership",
     );
-    for (const e of bundle.events)
+    for (const e of bundle.events) {
+      check(
+        typeof e.prev_hash === "string" && /^[0-9a-f]{64}$/.test(e.entry_hash ?? ""),
+        "Recovery journal is missing its audit-chain proof",
+      );
       store.run(
-        "INSERT INTO audit VALUES(?,?,?,?,?,?)",
+        "INSERT INTO audit(seq,at,actor,action,target,detail,prev_hash,entry_hash) VALUES(?,?,?,?,?,?,?,?)",
         e.seq,
         e.at,
         e.actor,
         e.action,
         e.target,
         e.detail,
+        e.prev_hash,
+        e.entry_hash,
       );
+    }
+    // Verify the complete restored chain before the recovery transaction can commit.
+    store.verifyAuditChain();
     clearResolvedProofs(store);
     store.run("DELETE FROM sessions");
     store.run("DELETE FROM invites");

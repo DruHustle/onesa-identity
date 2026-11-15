@@ -1123,6 +1123,7 @@ test("rollback replay rejects conflicting or malformed account contacts atomical
     assert.equal(result.replay, false);
     assert.equal(restored.lookup(env.issuer, "provider|new").id, newcomer.id);
     assert.equal(restored.lookup(env.issuer, "provider|new").email, "new@onesa.test");
+    assert.doesNotThrow(() => restored.verifyAuditChain());
   } finally {
     source.db.close();
     restored.db.close();
@@ -1178,6 +1179,7 @@ test("first recovery replay rejects altered or extra provider links atomically",
     assert.equal(restored.lookup(env.issuer, "provider|verified").status, "suspended");
     assert.deepEqual(restored.all("SELECT * FROM links WHERE id=?", id),
       source.all("SELECT * FROM links WHERE id=?", id));
+    assert.doesNotThrow(() => restored.verifyAuditChain());
   } finally {
     source.db.close();
     restored.db.close();
