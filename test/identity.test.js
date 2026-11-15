@@ -368,18 +368,23 @@ test("legacy import preserves explicit Portal and Engineering grant decisions ov
   try {
     const portalUser = randomUUID(),
       docsUser = randomUUID(),
-      identityAdmin = randomUUID();
+      identityAdmin = randomUUID(),
+      globalAdmin = randomUUID(),
+      explicitAdmin = randomUUID();
     const snapshot = {
       version: 1,
       accounts: [
         { id: portalUser, email: "portal@onesa.test", status: "active", role: "owner" },
         { id: docsUser, email: "docs@onesa.test", status: "active", role: "member" },
         { id: identityAdmin, email: "identity-admin@onesa.test", status: "active", role: "member" },
+        { id: globalAdmin, email: "global-admin@onesa.test", status: "active", role: "administrator" },
+        { id: explicitAdmin, email: "explicit-admin@onesa.test", status: "active", role: "member" },
       ],
       grants: [
         { id: portalUser, product: "portal", role: "editor", status: "active" },
         { id: docsUser, product: "engineering-documents", role: "viewer", status: "revoked" },
         { id: identityAdmin, product: "identity", role: "admin", status: "active" },
+        { id: explicitAdmin, product: "portal", role: "administrator", status: "active" },
       ],
       docs: [
         { id: docsUser, membership_id: randomUUID(), enabled: true },
@@ -399,9 +404,30 @@ test("legacy import preserves explicit Portal and Engineering grant decisions ov
     );
     assert.equal(store.activeGrant(docsUser, "engineering-documents"), undefined);
     assert.equal(store.activeGrant(identityAdmin, "identity"), undefined);
+    assert.equal(store.activeGrant(globalAdmin, "portal"), undefined);
+    assert.equal(
+      store.one("SELECT status FROM grants WHERE id=? AND product='portal'", globalAdmin).status,
+      "pending",
+    );
+    assert.equal(store.activeGrant(explicitAdmin, "portal"), undefined);
+    assert.equal(
+      store.one("SELECT status FROM grants WHERE id=? AND product='portal'", explicitAdmin).status,
+      "pending",
+    );
+    const discrepancies = store.all("SELECT kind,id FROM migration_discrepancies");
     assert.ok(
-      store.all("SELECT kind,id FROM migration_discrepancies").some(
+      discrepancies.some(
         (row) => row.kind === "review-product-grant" && row.id === identityAdmin + "/identity",
+      ),
+    );
+    assert.ok(
+      discrepancies.some(
+        (row) => row.kind === "review-product-grant" && row.id === explicitAdmin + "/portal",
+      ),
+    );
+    assert.ok(
+      discrepancies.some(
+        (row) => row.kind === "legacy-implicit-access" && row.id === globalAdmin,
       ),
     );
   } finally {
