@@ -61,7 +61,12 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
       "Additional source snapshots require explicit reconciliation",
     );
     const pending = [],
-      ids = new Set();
+      ids = new Set(),
+      explicitPortalGrants = new Set(
+        snapshot.grants
+          .filter((g) => g?.product === "portal")
+          .map((g) => g.id),
+      );
     let count = 0;
     for (const u of snapshot.accounts) {
       // A legacy snapshot can contain multiple accounts sharing a case-variant
@@ -88,7 +93,7 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         email,
         u.status,
       );
-      if (u.role !== "member")
+      if (u.role !== "member" && !explicitPortalGrants.has(u.id))
         store.run(
           "INSERT INTO grants VALUES(?,?,?,?)",
           u.id,
@@ -144,13 +149,22 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         });
       }
     }
-    for (const [id, enabled] of engineeringAccess)
-      grant({
-        id,
-        product: "engineering-documents",
-        role: "viewer",
-        status: enabled ? "active" : "revoked",
-      });
+    for (const [id, enabled] of engineeringAccess) {
+      // An explicit managed grant (including a pending or revoked decision)
+      // takes precedence over the entitlement inferred from legacy membership.
+      if (
+        !store.one(
+          "SELECT 1 FROM grants WHERE id=? AND product='engineering-documents'",
+          id,
+        )
+      )
+        grant({
+          id,
+          product: "engineering-documents",
+          role: "viewer",
+          status: enabled ? "active" : "revoked",
+        });
+    }
     store.db.exec(
       "CREATE TABLE IF NOT EXISTS legacy_inventory(kind TEXT, id TEXT, record TEXT NOT NULL, PRIMARY KEY(kind,id))",
     );
