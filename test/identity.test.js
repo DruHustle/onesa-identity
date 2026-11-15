@@ -9,6 +9,7 @@ import {
   rollbackDelta,
 } from "../migration/reconcile.js";
 import action from "../auth0/post-login.cjs";
+import { applyProofs } from "../migration/link-proof.js";
 const env = {
   origin: "https://identity-admin.onesa.test",
   issuer: "https://auth.onesa.test/",
@@ -275,12 +276,22 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
       () => applySnapshot(x, "pilot", snapshot, [], env.issuer),
       /reused/,
     );
+    applyProofs(x, env.issuer, [{
+      id: owner, issuer: env.issuer, subject: "provider|owner",
+      method: "dual-authentication", receipt: "verified-after-cutover",
+    }]);
     const delta = rollbackDelta(x, "pilot");
     replayDelta(y, delta);
     assert.equal(y.activeGrant(second, "farmer"), undefined);
     assert.equal(y.activeGrant(newUser.id, "farmer").role, "user");
     assert.equal(y.lookup(env.issuer, "provider|new").id, newUser.id);
+    const pending = (store) => applySnapshot(store, "pilot", snapshot, proofs, env.issuer).pending;
+    assert.deepEqual(pending(y), pending(x));
+    // A target replayed with the earlier release may still have the old proof reminder.
+    y.run("INSERT INTO migration_discrepancies VALUES('provider-ownership-proof',?)", owner);
     assert.equal(replayDelta(y, delta).replay, true);
+    assert.deepEqual(pending(y), pending(x));
+    assert.ok(pending(y).some(row => row.kind === "review-product-grant"));
   } finally {
     x.db.close();
     y.db.close();

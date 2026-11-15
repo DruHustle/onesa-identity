@@ -232,6 +232,16 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
     };
   });
 }
+// The live proof importer records a journal event and clears the corresponding reminder.
+function clearResolvedProofs(store) {
+  store.run(`DELETE FROM migration_discrepancies
+    WHERE kind='provider-ownership-proof' AND EXISTS (
+      SELECT 1 FROM audit JOIN links ON links.id=audit.target
+      WHERE audit.action='link-provider' AND audit.target=migration_discrepancies.id
+        AND links.issuer=json_extract(audit.detail,'$.issuer')
+    )`);
+}
+
 // Bring a separately restored baseline forward to a frozen cutover watermark.
 export function replayDelta(store, bundle) {
   return store.atomic(() => {
@@ -267,6 +277,7 @@ export function replayDelta(store, bundle) {
         JSON.stringify(existing) === JSON.stringify(bundle.events),
         "Recovery target has divergent writes",
       );
+      clearResolvedProofs(store);
       return { replay: true, accounts: actual.length };
     }
     for (const x of bundle.changed) {
@@ -325,6 +336,7 @@ export function replayDelta(store, bundle) {
         e.target,
         e.detail,
       );
+    clearResolvedProofs(store);
     store.run("DELETE FROM sessions");
     store.run("DELETE FROM invites");
     store.run("DELETE FROM challenges");
