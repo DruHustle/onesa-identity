@@ -11,6 +11,23 @@ import {
 } from "../migration/reconcile.js";
 import action from "../auth0/post-login.cjs";
 import { applyProofs } from "../migration/link-proof.js";
+const env = {
+  origin: "https://identity-admin.onesa.test",
+  issuer: "https://auth.onesa.test/",
+  clientId: "account-ui",
+  policyKey: "controlled-test-key",
+  resources: new Map([
+    [
+      "https://api.docs.onesa.eu",
+      { product: "internal-documents", clients: ["docs-web"] },
+    ],
+    [
+      "https://api.farmer.onesa.eu",
+      { product: "farmer", clients: ["farmer-web"] },
+    ],
+  ]),
+};
+
 test("resource registry rejects missing, non-HTTPS and ambiguous audiences", () => {
   const base = {
     OIDC_ISSUER: env.issuer,
@@ -67,22 +84,6 @@ test("resource registry rejects missing, non-HTTPS and ambiguous audiences", () 
   );
 });
 
-const env = {
-  origin: "https://identity-admin.onesa.test",
-  issuer: "https://auth.onesa.test/",
-  clientId: "account-ui",
-  policyKey: "controlled-test-key",
-  resources: new Map([
-    [
-      "https://api.docs.onesa.eu",
-      { product: "internal-documents", clients: ["docs-web"] },
-    ],
-    [
-      "https://api.farmer.onesa.eu",
-      { product: "farmer", clients: ["farmer-web"] },
-    ],
-  ]),
-};
 async function fixture(t, overrides = {}) {
   const store = openStore(":memory:");
   t.after(() => store.db.close());
