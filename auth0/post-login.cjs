@@ -3,21 +3,34 @@
 exports.onExecutePostLogin = async (event, api) => {
   const deny = () =>
     api.access.deny("Onesa access is unavailable for this application.");
-  const { POLICY_URL, POLICY_KEY } = event.secrets || {};
-  if (!POLICY_URL || !POLICY_KEY || event.user?.email_verified !== true) return deny();
+  const { POLICY_URL, POLICY_ORIGIN, POLICY_KEY } = event.secrets || {};
+  if (
+    !POLICY_URL ||
+    !POLICY_ORIGIN ||
+    !POLICY_KEY ||
+    event.user?.email_verified !== true
+  )
+    return deny();
   let decision;
   try {
     const url = new URL(POLICY_URL);
-    // This secret is sent as a bearer credential. Refuse URL decorations or
-    // paths other than the documented private policy endpoint so a typo or
-    // injected query/redirect target cannot forward the key to another route.
+    const origin = new URL(POLICY_ORIGIN);
+    // POLICY_KEY is a bearer credential. Require a separately configured,
+    // canonical HTTPS origin as well as the one exact endpoint; a path-only
+    // check would still leak the key if POLICY_URL named an attacker host.
     if (
-      url.protocol !== "https:" ||
-      url.username ||
-      url.password ||
+      origin.protocol !== "https:" ||
+      origin.username ||
+      origin.password ||
+      origin.pathname !== "/" ||
+      origin.search ||
+      origin.hash ||
+      url.origin !== origin.origin ||
+      url.pathname !== "/internal/decision" ||
       url.search ||
       url.hash ||
-      url.pathname !== "/internal/decision"
+      url.username ||
+      url.password
     )
       return deny();
     const result = await fetch(url, {
