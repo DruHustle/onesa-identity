@@ -283,6 +283,34 @@ export function replayDelta(store, bundle) {
         !store.one("SELECT 1 FROM accounts GROUP BY email COLLATE NOCASE HAVING count(*)>1 LIMIT 1"),
         "Conflicting recovered contact ownership",
       );
+      // A matching audit sequence alone does not prove the restored identity
+      // state is intact: direct database drift could change grants or links
+      // without appending a journal event.
+      for (const x of bundle.changed) {
+        check(
+          JSON.stringify(store.one("SELECT * FROM accounts WHERE id=?", x.account.id)) ===
+            JSON.stringify(x.account),
+          "Recovery target has divergent account state",
+        );
+        const links = store.all(
+          "SELECT * FROM links WHERE id=? ORDER BY issuer,subject",
+          x.account.id,
+        );
+        const expectedLinks = [...x.links].sort(
+          (a, b) => a.issuer.localeCompare(b.issuer) || a.subject.localeCompare(b.subject),
+        );
+        check(JSON.stringify(links) === JSON.stringify(expectedLinks),
+          "Recovery target has divergent provider links");
+        const grants = store.all(
+          "SELECT * FROM grants WHERE id=? ORDER BY product",
+          x.account.id,
+        );
+        const expectedGrants = [...x.grants].sort(
+          (a, b) => a.product.localeCompare(b.product),
+        );
+        check(JSON.stringify(grants) === JSON.stringify(expectedGrants),
+          "Recovery target has divergent grants");
+      }
       clearResolvedProofs(store);
       store.run("DELETE FROM sessions");
       store.run("DELETE FROM invites");
