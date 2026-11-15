@@ -618,6 +618,22 @@ test("idempotent rollback replay also invalidates restored sessions, invites and
     const delta = rollbackDelta(source, "recovery-expiry");
     assert.equal(replayDelta(restored, delta).replay, false);
 
+    // An idempotent retry must detect unjournaled data drift, not just the
+    // fact that an identical audit sequence has already been applied.
+    restored.run("UPDATE accounts SET status='active' WHERE id=?", newcomer.id);
+    assert.throws(() => replayDelta(restored, delta), /divergent account state/);
+    restored.run("UPDATE accounts SET status='pending' WHERE id=?", newcomer.id);
+
+    restored.run("INSERT INTO grants VALUES(?,?,?,?)",
+      newcomer.id, "farmer", "user", "active");
+    assert.throws(() => replayDelta(restored, delta), /divergent grants/);
+    restored.run("DELETE FROM grants WHERE id=?", newcomer.id);
+
+    const evidence = restored.one("SELECT evidence FROM links WHERE id=?", newcomer.id).evidence;
+    restored.run("UPDATE links SET evidence='tampered' WHERE id=?", newcomer.id);
+    assert.throws(() => replayDelta(restored, delta), /divergent provider links/);
+    restored.run("UPDATE links SET evidence=? WHERE id=?", evidence, newcomer.id);
+
     // Model credentials accidentally reintroduced from a restored backup.
     restored.run("INSERT INTO sessions VALUES(?,?,?,?,?)",
       digest("stale-session"), newcomer.id, "csrf", Date.now() + 600000, 0);
