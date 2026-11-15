@@ -343,6 +343,14 @@ BEGIN
  SELECT * INTO old FROM public.onesa_legacy_rollback_receipts WHERE snapshot_key=plan->>'key';
  IF FOUND THEN
    IF old.manifest_sha!='${hash}' OR old.after_sha!=state_hash OR old.security_sha!=(SELECT encode(sha256(convert_to(old.security_salt::text||state::text,'UTF8')),'hex') FROM credential_state) THEN RAISE EXCEPTION 'Rollback receipt or target diverged; keep restored issuer offline'; END IF;
+   -- A verified idempotent retry can still be run against a restored target
+   -- containing stale login or recovery credentials. These are outside the
+   -- inventory and credential fingerprints, so always invalidate them again.
+   DELETE FROM public.sessions; DELETE FROM public.identity_sessions; DELETE FROM public.identity_grant_sessions;
+   DELETE FROM public.identity_records; DELETE FROM public.engineering_identity_records;
+   DELETE FROM public.engineering_email_challenges; DELETE FROM public.access_links; DELETE FROM public.recovery_tokens;
+   DELETE FROM public.identity_registration_links;
+   IF to_regclass('public.portal_login_transactions') IS NOT NULL THEN EXECUTE 'DELETE FROM public.portal_login_transactions'; END IF;
    RETURN;
  END IF;
  IF EXISTS(SELECT 1 FROM public.onesa_legacy_rollback_receipts) THEN RAISE EXCEPTION 'Target already holds another rollback'; END IF;
