@@ -25,7 +25,7 @@ const env = {
     ],
   ]),
 };
-async function fixture(t) {
+async function fixture(t, overrides = {}) {
   const store = openStore(":memory:");
   t.after(() => store.db.close());
   let factor = Date.now(),
@@ -40,7 +40,7 @@ async function fixture(t) {
       "https://onesa.eu/claims/mfa_time": Math.floor(factor / 1000),
     }),
   };
-  const app = createApp(store, env, fake);
+  const app = createApp(store, { ...env, ...overrides }, fake);
   const call = (url, method = "GET", body, headers = {}) =>
     app(new Request(env.origin + url, { method, headers, body }));
   async function login(name, returnTo = "/admin", factorTime = Date.now()) {
@@ -328,4 +328,36 @@ test("Auth0 Action emits audience-limited claims and factor timestamp, fails clo
   } finally {
     globalThis.fetch = original;
   }
+});
+
+test("password recovery reports provider timeout as 503 without success audit", async (t) => {
+  const { store, call, login } = await fixture(t, {
+    connection: "Username-Password-Authentication",
+  });
+  const user = await login("identity-admin", "/account");
+  const account = await call("/account", "GET", undefined, { cookie: user.cookie });
+  const csrf = (await account.text()).match(/name="csrf" value="([^"]+)"/)[1];
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => { throw new TypeError("provider unavailable"); };
+  const result = await call(
+    "/account/recovery",
+    "POST",
+    new URLSearchParams({ csrf }),
+    { cookie: user.cookie, origin: env.origin },
+  );
+  assert.equal(result.status, 503);
+  assert.match(await result.text(), /Recovery unavailable/);
+  assert.equal(
+    store.one("SELECT 1 FROM audit WHERE action='request-password-recovery'"),
+    undefined,
+  );
+  // Ambiguous delivery must not allow repeated password reset messages.
+  const retry = await call(
+    "/account/recovery",
+    "POST",
+    new URLSearchParams({ csrf }),
+    { cookie: user.cookie, origin: env.origin },
+  );
+  assert.equal(retry.status, 429);
 });

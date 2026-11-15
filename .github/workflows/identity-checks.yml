@@ -1,0 +1,38 @@
+name: Identity checks
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "test/**"
+      - "migration/**"
+      - "auth0/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/identity-checks.yml"
+  push:
+    branches: [dev, staging, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: identity-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm test

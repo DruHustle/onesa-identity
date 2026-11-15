@@ -277,11 +277,12 @@ export function createApp(store, env, client = authClient(env)) {
       if (!compare(form.get("csrf"), session.csrf))
         return new Response(null, { status: 403 });
       if (p === "/account/recovery" && env.connection) {
+        const recoveryNow = Date.now();
         const claimed = store.run(
           "INSERT INTO recovery_limit VALUES(?,?) ON CONFLICT(id) DO UPDATE SET next=excluded.next WHERE recovery_limit.next<=?",
           session.id,
-          Date.now() + 60000,
-          Date.now(),
+          recoveryNow + 60000,
+          recoveryNow,
         ).changes;
         if (!claimed)
           return page(
@@ -289,26 +290,35 @@ export function createApp(store, env, client = authClient(env)) {
             "Check your inbox before requesting another email.",
             429,
           );
-        const r = await fetch(
-          new URL("/dbconnections/change_password", env.issuer),
-          {
-            method: "POST",
-            redirect: "error",
-            signal: AbortSignal.timeout(5000),
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              client_id: env.clientId,
-              email: session.email,
-              connection: env.connection,
-            }),
-          },
-        );
-        if (!r.ok)
+        let delivered = false;
+        try {
+          const r = await fetch(
+            new URL("/dbconnections/change_password", env.issuer),
+            {
+              method: "POST",
+              redirect: "error",
+              signal: AbortSignal.timeout(5000),
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                client_id: env.clientId,
+                email: session.email,
+                connection: env.connection,
+              }),
+            },
+          );
+          delivered = r.ok;
+        } catch {
+          // Provider timeout or network failure must not become a generic 400.
+        }
+        if (!delivered) {
+          // A timeout has an ambiguous delivery outcome. Retain the rate
+          // limit so repeated requests cannot flood the recipient's inbox.
           return page(
             "Recovery unavailable",
-            "Retry from the sign-in screen.",
+            "The recovery provider could not confirm this request. Retry from the sign-in screen.",
             503,
           );
+        }
         store.audit(session.id, "request-password-recovery", session.id);
         return page(
           "Check your inbox",
