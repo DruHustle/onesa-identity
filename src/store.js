@@ -29,6 +29,16 @@ export const uuid = (value) =>
 export const secret = () => randomBytes(32).toString("base64url");
 export const digest = (value) =>
   createHash("sha256").update(value).digest("hex");
+const auditHash = (previous, row) =>
+  digest(JSON.stringify([
+    previous,
+    row.seq,
+    row.at,
+    row.actor,
+    row.action,
+    row.target,
+    row.detail,
+  ]));
 export class Rejected extends Error {}
 const check = (condition, message) => {
   if (!condition) throw new Rejected(message);
@@ -54,15 +64,93 @@ export function openStore(path) {
   const one = (q, ...a) => db.prepare(q).get(...a);
   const all = (q, ...a) => db.prepare(q).all(...a);
   const run = (q, ...a) => db.prepare(q).run(...a);
-  const audit = (actor, action, id, detail = {}) =>
-    run(
-      "INSERT INTO audit(at,actor,action,target,detail) VALUES(?,?,?,?,?)",
-      Date.now(),
+
+  // Upgrade existing audit tables atomically. A partially present chain is
+  // rejected rather than silently re-hashed, which could conceal tampering.
+  const auditColumns = new Set(all("PRAGMA table_info(audit)").map((row) => row.name));
+  const hasPreviousHash = auditColumns.has("prev_hash");
+  const hasEntryHash = auditColumns.has("entry_hash");
+  if (hasPreviousHash !== hasEntryHash)
+    throw Error("Incomplete Identity audit-chain schema");
+  if (!hasPreviousHash) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(
+        "ALTER TABLE audit ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''; " +
+        "ALTER TABLE audit ADD COLUMN entry_hash TEXT NOT NULL DEFAULT '';",
+      );
+      let previous = "";
+      for (const row of all(
+        "SELECT seq,at,actor,action,target,detail FROM audit ORDER BY seq",
+      )) {
+        const entryHash = auditHash(previous, row);
+        run(
+          "UPDATE audit SET prev_hash=?,entry_hash=? WHERE seq=?",
+          previous,
+          entryHash,
+          row.seq,
+        );
+        previous = entryHash;
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  function verifyAuditChain() {
+    let previous = "";
+    const rows = all(
+      "SELECT seq,at,actor,action,target,detail,prev_hash,entry_hash FROM audit ORDER BY seq",
+    );
+    for (const row of rows) {
+      const expected = auditHash(previous, row);
+      if (row.prev_hash !== previous || row.entry_hash !== expected)
+        throw Error("Identity audit integrity failure at sequence " + row.seq);
+      previous = row.entry_hash;
+    }
+    return { entries: rows.length, head: previous };
+  }
+
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS audit_append_only_update
+      BEFORE UPDATE ON audit
+      BEGIN SELECT RAISE(ABORT, 'Identity audit log is append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS audit_append_only_delete
+      BEFORE DELETE ON audit
+      BEGIN SELECT RAISE(ABORT, 'Identity audit log is append-only'); END;
+  `);
+  verifyAuditChain();
+
+  const audit = (actor, action, id, detail = {}) => {
+    const previousRow = one(
+      "SELECT seq,entry_hash FROM audit ORDER BY seq DESC LIMIT 1",
+    );
+    const seq = (previousRow?.seq ?? 0) + 1;
+    const at = Date.now();
+    const serialized = JSON.stringify(detail);
+    const prevHash = previousRow?.entry_hash ?? "";
+    const entryHash = auditHash(prevHash, {
+      seq,
+      at,
+      actor,
+      action,
+      target: id,
+      detail: serialized,
+    });
+    return run(
+      "INSERT INTO audit(seq,at,actor,action,target,detail,prev_hash,entry_hash) VALUES(?,?,?,?,?,?,?,?)",
+      seq,
+      at,
       actor,
       action,
       id,
-      JSON.stringify(detail),
+      serialized,
+      prevHash,
+      entryHash,
     );
+  };
   function atomic(fn) {
     db.exec("BEGIN IMMEDIATE");
     try {
@@ -232,6 +320,7 @@ export function openStore(path) {
     all,
     run,
     audit,
+    verifyAuditChain,
     atomic,
     lookup,
     activeGrant,
