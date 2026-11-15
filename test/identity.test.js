@@ -873,7 +873,7 @@ test("legacy import rejects unknown Drone tenant roles atomically", () => {
 
 test("transient OIDC token-exchange failure preserves the one-use invitation for retry", async (t) => {
   const { call, store, setRedeem } = await fixture(t);
-  const invitation = "c".repeat(43);
+  const invitation = store.invite("identity-admin", "new-invitee@onesa.test");
   const start = await call("/register?invite=" + invitation);
   const params = new URL(start.headers.get("location")).searchParams;
   const flow = start.headers.getSetCookie()[0].split(";")[0];
