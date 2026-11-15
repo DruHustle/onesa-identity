@@ -73,7 +73,7 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         uuid(u.id) &&
           !ids.has(u.id) &&
           email.length <= 254 &&
-          /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email) &&
+          /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) &&
           !emails.has(email) &&
           ["active", "suspended"].includes(u.status),
         "Conflicting account snapshot",
