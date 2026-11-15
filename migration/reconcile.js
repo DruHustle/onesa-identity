@@ -121,24 +121,36 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         pending.push({kind: "review-product-grant", id: g.id + "/" + g.product});
       } else grant(g);
     }
+    // A person may own more than one legacy Engineering membership. The
+    // Identity grant is account-level, while each membership ID and its
+    // record ACL remain product-owned. Aggregate the entitlement once rather
+    // than attempting duplicate (account, product) grant inserts.
+    const engineeringAccess = new Map();
     for (const d of snapshot.docs) {
       check(
         uuid(d.membership_id) && typeof d.enabled === "boolean",
         "Invalid document membership",
       );
-      if (d.id)
-        grant({
-          id: d.id,
-          product: "engineering-documents",
-          role: "viewer",
-          status: d.enabled ? "active" : "revoked",
-        });
-      else
+      if (d.id !== null && d.id !== undefined) {
+        check(ids.has(d.id), "Conflicting resource grant");
+        engineeringAccess.set(
+          d.id,
+          Boolean(engineeringAccess.get(d.id) || d.enabled),
+        );
+      } else {
         pending.push({
           kind: "unlinked-document-membership",
           id: d.membership_id,
         });
+      }
     }
+    for (const [id, enabled] of engineeringAccess)
+      grant({
+        id,
+        product: "engineering-documents",
+        role: "viewer",
+        status: enabled ? "active" : "revoked",
+      });
     store.db.exec(
       "CREATE TABLE IF NOT EXISTS legacy_inventory(kind TEXT, id TEXT, record TEXT NOT NULL, PRIMARY KEY(kind,id))",
     );
