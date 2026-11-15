@@ -104,6 +104,8 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
       // Old global-admin and implicit Farmer rights require an explicit resource-owner disposition.
       if (u.role !== "member")
         pending.push({ kind: "legacy-implicit-access", id: u.id });
+      if (["owner", "administrator"].includes(u.role))
+        pending.push({ kind: "review-product-grant", id: u.id + "/portal" });
     }
     function grant(row) {
       check(
