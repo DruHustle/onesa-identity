@@ -399,4 +399,9 @@ test("verified email change preserves stable user ID, grants, and audit trail", 
   );
   assert.equal(store.lookup(env.issuer, "oidc|stable").email, "new@onesa.test");
   assert.equal(store.lookup(env.issuer, "oidc|other").id, other.id);
+  assert.throws(
+    () => store.register(env.issuer, "oidc|stable", "not-an-email"),
+    /Verified address required/,
+  );
+  assert.equal(store.lookup(env.issuer, "oidc|stable").email, "new@onesa.test");
 });
