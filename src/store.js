@@ -156,8 +156,15 @@ export function openStore(path) {
       "Enter a valid address",
     );
     return atomic(() => {
-      const token = secret(),
-        contact = email.trim().toLowerCase();
+      const contact = email.trim().toLowerCase();
+      // Invitations are for new identities only. Do not create a link that
+      // registration can never consume, or let an invitation appear to
+      // bypass an existing (including suspended) account's review state.
+      check(
+        !one("SELECT 1 FROM accounts WHERE email=? COLLATE NOCASE", contact),
+        "An account already exists for this address; manage the existing account",
+      );
+      const token = secret();
       run(
         "DELETE FROM invites WHERE expires<=? OR email=?",
         Date.now(),
