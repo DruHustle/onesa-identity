@@ -466,6 +466,7 @@ test("Auth0 Action emits audience-limited claims and factor timestamp, fails clo
     user: { user_id: "test", email_verified: true },
     secrets: {
       POLICY_URL: "https://identity-admin.onesa.test/internal/decision",
+      POLICY_ORIGIN: "https://identity-admin.onesa.test",
       POLICY_KEY: "test",
     },
   };
@@ -514,11 +515,13 @@ test("Auth0 Action never sends the policy bearer key to a decorated or non-polic
       user: { user_id: "auth0|fixture", email_verified: true },
       secrets: {
         POLICY_URL: "https://identity-admin.onesa.test/internal/decision",
+        POLICY_ORIGIN: "https://identity-admin.onesa.test",
         POLICY_KEY: "controlled-policy-key",
       },
     };
     for (const POLICY_URL of [
       "http://identity-admin.onesa.test/internal/decision",
+      "https://attacker.invalid/internal/decision",
       "https://identity-admin.onesa.test/collect",
       "https://identity-admin.onesa.test/internal/decision?forward=1",
       "https://user:pass@identity-admin.onesa.test/internal/decision",
@@ -532,6 +535,23 @@ test("Auth0 Action never sends the policy bearer key to a decorated or non-polic
       assert.equal(denied, true, POLICY_URL);
       assert.equal(requested, false, POLICY_URL);
     }
+    requested = false;
+    denied = false;
+    await action.onExecutePostLogin(
+      { ...base, secrets: { ...base.secrets, POLICY_ORIGIN: "https://attacker.invalid" } },
+      api,
+    );
+    assert.equal(denied, true);
+    assert.equal(requested, false);
+    requested = false;
+    denied = false;
+    const { POLICY_ORIGIN, ...missingOrigin } = base.secrets;
+    await action.onExecutePostLogin(
+      { ...base, secrets: missingOrigin },
+      api,
+    );
+    assert.equal(denied, true);
+    assert.equal(requested, false);
   } finally {
     globalThis.fetch = original;
   }
