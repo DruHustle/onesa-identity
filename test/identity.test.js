@@ -96,15 +96,17 @@ async function fixture(t, overrides = {}) {
   t.after(() => store.db.close());
   let factor = Date.now(),
     subject = "oidc|identity-admin";
+  const defaultRedeem = async () => ({
+    iss: env.issuer,
+    sub: subject,
+    email_verified: true,
+    email: subject.split("|")[1] + "@onesa.test",
+    "https://onesa.eu/claims/mfa_time": Math.floor(factor / 1000),
+  });
+  let redeem = defaultRedeem;
   const fake = {
     authorize: async (p) => env.issuer + "authorize?" + new URLSearchParams(p),
-    redeem: async () => ({
-      iss: env.issuer,
-      sub: subject,
-      email_verified: true,
-      email: subject.split("|")[1] + "@onesa.test",
-      "https://onesa.eu/claims/mfa_time": Math.floor(factor / 1000),
-    }),
+    redeem: (...args) => redeem(...args),
   };
   const app = createApp(store, { ...env, ...overrides }, fake);
   const call = (url, method = "GET", body, headers = {}) =>
@@ -142,7 +144,7 @@ async function fixture(t, overrides = {}) {
     role: "admin",
     status: "active",
   });
-  return { store, call, login, admin };
+  return { store, call, login, admin, setRedeem: (next) => { redeem = next ?? defaultRedeem; } };
 }
 test("Identity UI changes grant, revocation and suspension at next issuance; resources scoped to client/audience", async (t) => {
   const { store, call, login } = await fixture(t),
@@ -869,6 +871,37 @@ test("legacy import rejects unknown Drone tenant roles atomically", () => {
   }
 });
 
+test("transient OIDC token-exchange failure preserves the one-use invitation for retry", async (t) => {
+  const { call, store, setRedeem } = await fixture(t);
+  const invitation = "c".repeat(43);
+  const start = await call("/register?invite=" + invitation);
+  const params = new URL(start.headers.get("location")).searchParams;
+  const flow = start.headers.getSetCookie()[0].split(";")[0];
+
+  setRedeem(async () => { throw new Error("temporary token endpoint outage"); });
+  const failed = await call(
+    "/callback?code=controlled&state=" + encodeURIComponent(params.get("state")),
+    "GET", undefined, { cookie: flow },
+  );
+  assert.equal(failed.status, 503);
+  assert.ok((await failed.text()).includes('href="/login?invite=' + invitation + '"'));
+  assert.equal(store.one("SELECT count(*) AS n FROM invites").n, 1);
+  assert.equal(store.one("SELECT count(*) AS n FROM accounts WHERE email='identity-admin@onesa.test'").n, 1);
+
+  setRedeem();
+  const retry = await call("/login?invite=" + invitation);
+  const retryParams = new URL(retry.headers.get("location")).searchParams;
+  const retryFlow = retry.headers.getSetCookie()[0].split(";")[0];
+  const completed = await call(
+    "/callback?code=controlled&state=" + encodeURIComponent(retryParams.get("state")),
+    "GET", undefined, { cookie: retryFlow },
+  );
+  assert.equal(completed.status, 303);
+  assert.equal(completed.headers.get("location"), "/account?invite=" + invitation);
+  assert.equal(store.one("SELECT count(*) AS n FROM invites").n, 0);
+  assert.equal(store.one("SELECT count(*) AS n FROM accounts WHERE email='identity-admin@onesa.test'").n, 1);
+});
+ 
 test("provider cancellation retry preserves invitation and restricts return destinations", async (t) => {
   const { call } = await fixture(t);
   const invitation = "b".repeat(43);
