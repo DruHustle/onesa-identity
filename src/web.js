@@ -192,7 +192,7 @@ export function createApp(store, env, client = authClient(env)) {
         // parameter, not an arbitrary return URL.
         const destination = new URL(flow.destination, env.origin);
         const invite = destination.searchParams.get("invite");
-        const retry = invite && /^[\\w-]{43}$/.test(invite)
+        const retry = invite && /^[\w-]{43}$/.test(invite)
           ? "/login?invite=" + encodeURIComponent(invite)
           : destination.pathname === "/admin"
             ? "/login?return=%2Fadmin"
