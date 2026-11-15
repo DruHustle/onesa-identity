@@ -888,7 +888,12 @@ test("transient OIDC token-exchange failure preserves the one-use invitation for
   assert.equal(store.one("SELECT count(*) AS n FROM invites").n, 1);
   assert.equal(store.one("SELECT count(*) AS n FROM accounts WHERE email='identity-admin@onesa.test'").n, 1);
 
-  setRedeem();
+  setRedeem(async () => ({
+    iss: env.issuer,
+    sub: "oidc|new-invitee",
+    email_verified: true,
+    email: "new-invitee@onesa.test",
+  }));
   const retry = await call("/login?invite=" + invitation);
   const retryParams = new URL(retry.headers.get("location")).searchParams;
   const retryFlow = retry.headers.getSetCookie()[0].split(";")[0];
@@ -900,6 +905,8 @@ test("transient OIDC token-exchange failure preserves the one-use invitation for
   assert.equal(completed.headers.get("location"), "/account?invite=" + invitation);
   assert.equal(store.one("SELECT count(*) AS n FROM invites").n, 0);
   assert.equal(store.one("SELECT count(*) AS n FROM accounts WHERE email='identity-admin@onesa.test'").n, 1);
+  assert.equal(store.lookup(env.issuer, "oidc|new-invitee").email, "new-invitee@onesa.test");
+  assert.equal(store.lookup(env.issuer, "oidc|new-invitee").status, "pending");
 });
  
 test("provider cancellation retry preserves invitation and restricts return destinations", async (t) => {
