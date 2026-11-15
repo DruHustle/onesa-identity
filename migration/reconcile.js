@@ -143,10 +143,9 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         grant(g);
       }
     }
-    // A person may own more than one legacy Engineering membership. The
-    // Identity grant is account-level, while each membership ID and its
-    // record ACL remain product-owned. Aggregate the entitlement once rather
-    // than attempting duplicate (account, product) grant inserts.
+    // The Portal schema enforces one Engineering membership per Identity
+    // account. Reject a corrupted or ambiguous export instead of allowing
+    // duplicate ownership to alter the account-level product entitlement.
     const engineeringAccess = new Map();
     for (const d of snapshot.docs) {
       check(
@@ -154,11 +153,11 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         "Invalid document membership",
       );
       if (d.id !== null && d.id !== undefined) {
-        check(ids.has(d.id), "Conflicting resource grant");
-        engineeringAccess.set(
-          d.id,
-          Boolean(engineeringAccess.get(d.id) || d.enabled),
+        check(
+          ids.has(d.id) && !engineeringAccess.has(d.id),
+          "Duplicate Engineering membership owner",
         );
+        engineeringAccess.set(d.id, d.enabled);
       } else {
         pending.push({
           kind: "unlinked-document-membership",
