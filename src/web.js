@@ -186,14 +186,23 @@ export function createApp(store, env, client = authClient(env)) {
           '<a href="/login">Start sign-in again</a>',
           400,
         );
-      if (url.searchParams.get("error"))
+      if (url.searchParams.get("error")) {
+        // Preserve the one-use invitation across an IdP cancellation or
+        // temporary provider error. /login only accepts the validated invite
+        // parameter, not an arbitrary return URL.
+        const destination = new URL(flow.destination, env.origin);
+        const invite = destination.searchParams.get("invite");
+        const retry = invite && /^[\\w-]{43}$/.test(invite)
+          ? "/login?invite=" + encodeURIComponent(invite)
+          : destination.pathname === "/admin"
+            ? "/login?return=%2Fadmin"
+            : "/login";
         return page(
           "Sign-in unavailable",
-          '<a href="/login?return=' +
-            encodeURIComponent(flow.destination) +
-            '">Try again</a>',
+          '<a href="' + retry + '">Try again</a>',
           403,
         );
+      }
       const identity = await client.redeem(url, flow);
       if (
         identity?.iss !== env.issuer ||
