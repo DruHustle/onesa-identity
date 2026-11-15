@@ -1099,6 +1099,10 @@ test("rollback replay rejects conflicting or malformed account contacts atomical
     const newcomer = source.register(env.issuer, "provider|new", "new@onesa.test");
     const delta = rollbackDelta(source, "recovery-contacts");
     const baseline = restored.one("SELECT max(seq) AS seq FROM audit").seq;
+    const tampered = structuredClone(delta);
+    tampered.events[0].detail = '{"tampered":true}';
+    assert.throws(() => replayDelta(restored, tampered), /Recovery audit chain integrity failure/);
+    assert.equal(restored.one("SELECT max(seq) AS seq FROM audit").seq, baseline);
 
     const collision = structuredClone(delta);
     collision.changed[0].account.email = "original@onesa.test";

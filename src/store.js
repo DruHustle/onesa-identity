@@ -113,6 +113,33 @@ export function openStore(path) {
     return { entries: rows.length, head: previous };
   }
 
+  // Verify the source chain in a recovery bundle, then re-chain events onto
+  // the restored database's baseline rather than copying incompatible hashes.
+  function verifyAuditEvents(events, initialHash) {
+    if (!Array.isArray(events) || typeof initialHash !== "string")
+      throw Error("Invalid recovery audit chain");
+    let previous = initialHash;
+    for (const row of events) {
+      const expected = auditHash(previous, row);
+      if (row.prev_hash !== previous || row.entry_hash !== expected)
+        throw Error("Recovery audit chain integrity failure at sequence " + row.seq);
+      previous = row.entry_hash;
+    }
+    return { entries: events.length, head: previous };
+  }
+
+  function appendAuditEvent(row) {
+    const previousRow = one("SELECT seq,entry_hash FROM audit ORDER BY seq DESC LIMIT 1");
+    const seq = (previousRow?.seq ?? 0) + 1;
+    if (row.seq !== seq) throw Error("Recovery audit sequence mismatch");
+    const previous = previousRow?.entry_hash ?? "";
+    const entryHash = auditHash(previous, row);
+    return run(
+      "INSERT INTO audit(seq,at,actor,action,target,detail,prev_hash,entry_hash) VALUES(?,?,?,?,?,?,?,?)",
+      row.seq, row.at, row.actor, row.action, row.target, row.detail, previous, entryHash,
+    );
+  }
+
   db.exec(`
     CREATE TRIGGER IF NOT EXISTS audit_append_only_update
       BEFORE UPDATE ON audit
@@ -321,6 +348,8 @@ export function openStore(path) {
     run,
     audit,
     verifyAuditChain,
+    verifyAuditEvents,
+    appendAuditEvent,
     atomic,
     lookup,
     activeGrant,
