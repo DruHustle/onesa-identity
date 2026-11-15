@@ -51,8 +51,10 @@ const post = (path, csrf, body) =>
   hidden("csrf", csrf) +
   body +
   "</form>";
-const options = (items) =>
-  items.map((x) => "<option>" + esc(x) + "</option>").join("");
+const options = (items, selected) =>
+  items.map((item) =>
+    (item === selected ? "<option selected>" : "<option>") + esc(item) + "</option>"
+  ).join("");
 const mfaClaim = "https://onesa.eu/claims/mfa_time";
 export function authClient(env, transport) {
   let configured;
@@ -176,11 +178,12 @@ export function createApp(store, env, client = authClient(env)) {
     }
     if (p === "/callback" && method === "GET") {
       const flow = store.one(
-        "DELETE FROM challenges WHERE hash=? AND expires>? RETURNING *",
+        "DELETE FROM challenges WHERE hash=? AND state=? AND expires>? RETURNING *",
         digest(readCookie(req, "flow")),
+        url.searchParams.get("state"),
         Date.now(),
       );
-      if (!flow || !compare(flow.state, url.searchParams.get("state")))
+      if (!flow)
         return page(
           "Sign-in expired",
           '<a href="/login">Start sign-in again</a>',
@@ -383,7 +386,7 @@ export function createApp(store, env, client = authClient(env)) {
               base +
                 hidden("kind", "status") +
                 '<label>Account status<select name="status">' +
-                options(["active", "suspended", "pending", "rejected"]) +
+                options(["active", "suspended", "pending", "rejected"], u.status) +
                 "</select></label><button>Update account</button>",
             ) +
             post(
