@@ -272,8 +272,7 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
   try {
     const owner = randomUUID(),
       second = randomUUID(),
-      membership_id = randomUUID(),
-      disabled_membership_id = randomUUID();
+      membership_id = randomUUID();
     const snapshot = {
       version: 1,
       accounts: [
@@ -294,10 +293,7 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
         { id: second, product: "farmer", role: "user", status: "active" },
         { id: owner, product: "pasofi", role: "admin", status: "active" },
       ],
-      docs: [
-        { id: second, membership_id, enabled: true },
-        { id: second, membership_id: disabled_membership_id, enabled: false },
-      ],
+      docs: [{ id: second, membership_id, enabled: true }],
       drone_memberships: [],
       registrations: [],
     };
@@ -319,7 +315,7 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
       assert.equal(s.activeGrant(second, "engineering-documents").role, "viewer");
       assert.equal(
         s.one("SELECT count(*) AS n FROM legacy_inventory WHERE kind='docs'").n,
-        2,
+        1,
       );
       assert.ok(r.pending.some((x) => x.kind === "review-product-grant"));
       assert.ok(r.pending.some((x) => x.kind === "provider-ownership-proof"));
@@ -605,6 +601,36 @@ test("OIDC callback preserves a validated invitation destination", async (t) => 
   );
   assert.equal(result.status, 303);
   assert.equal(result.headers.get("location"), "/account?invite=" + invitation);
+});
+
+test("legacy import rejects duplicate Engineering membership owners atomically", () => {
+  const store = openStore(":memory:");
+  try {
+    const id = randomUUID();
+    const snapshot = {
+      version: 1,
+      accounts: [
+        { id, email: "engineering@onesa.test", status: "active", role: "member" },
+      ],
+      grants: [],
+      docs: [
+        { id, membership_id: randomUUID(), enabled: true },
+        { id, membership_id: randomUUID(), enabled: false },
+      ],
+      registrations: [],
+      drone_memberships: [],
+    };
+    assert.throws(
+      () => applySnapshot(store, "duplicate-engineering-owner", snapshot, [], env.issuer),
+      /Duplicate Engineering membership owner/,
+    );
+    assert.equal(store.one("SELECT count(*) AS n FROM accounts").n, 0);
+    assert.equal(store.one("SELECT count(*) AS n FROM legacy_inventory").n, 0);
+    assert.equal(store.one("SELECT count(*) AS n FROM imports").n, 0);
+    assert.equal(store.one("SELECT count(*) AS n FROM audit").n, 0);
+  } finally {
+    store.db.close();
+  }
 });
 
 test("legacy import rejects ambiguous email ownership atomically and normalizes accepted contacts", () => {
