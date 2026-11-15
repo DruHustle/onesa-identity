@@ -121,10 +121,17 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
       );
     }
     for (const g of snapshot.grants) {
-      if ((g.product === "pasofi" && g.role !== "customer") || g.product === "internal-documents") {
-        // The Portal export alone cannot prove staff duties or access to other document domains.
-        pending.push({kind: "review-product-grant", id: g.id + "/" + g.product});
-      } else grant(g);
+      if (
+        (g.product === "pasofi" && g.role !== "customer") ||
+        g.product === "internal-documents" ||
+        g.product === "identity"
+      ) {
+        // A Portal export cannot prove staff duties, Identity administration,
+        // or access to separately owned document domains.
+        pending.push({ kind: "review-product-grant", id: g.id + "/" + g.product });
+      } else {
+        grant(g);
+      }
     }
     // A person may own more than one legacy Engineering membership. The
     // Identity grant is account-level, while each membership ID and its
