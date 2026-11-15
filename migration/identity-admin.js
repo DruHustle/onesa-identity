@@ -31,7 +31,7 @@ export function bootstrapIdentityAdmin(store, issuer, id, receipt) {
     // independently authorized replacement administrator from bootstrapping.
     if (
       store.one(
-        "SELECT g.id FROM grants g JOIN accounts a USING(id) WHERE g.product='identity' AND g.status='active' AND a.status='active' LIMIT 1",
+        "SELECT g.id FROM grants g JOIN accounts a USING(id) WHERE g.product='identity' AND g.role='admin' AND g.status='active' AND a.status='active' LIMIT 1",
       )
     )
       throw Error(
