@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,6 +19,56 @@ import action from "../auth0/post-login.cjs";
 import stepUp from "../auth0/step-up.cjs";
 import { applyProofs } from "../migration/link-proof.js";
 import { bootstrapIdentityAdmin } from "../migration/identity-admin.js";
+test("audit chain upgrades legacy rows, blocks mutation and detects tampering", () => {
+  const directory = mkdtempSync(join(tmpdir(), "onesa-audit-"));
+  const file = join(directory, "identity.sqlite");
+  const legacy = new DatabaseSync(file);
+  legacy.exec(`
+    CREATE TABLE audit(
+      seq INTEGER PRIMARY KEY, at INTEGER NOT NULL, actor TEXT NOT NULL,
+      action TEXT NOT NULL, target TEXT, detail TEXT NOT NULL
+    );
+    INSERT INTO audit VALUES(7,1700000000000,'legacy','migration',NULL,'{"legacy":true}');
+  `);
+  legacy.close();
+
+  const store = openStore(file);
+  try {
+    const upgraded = store.verifyAuditChain();
+    assert.equal(upgraded.entries, 1);
+    assert.match(upgraded.head, /^[0-9a-f]{64}$/);
+
+    const user = store.register(
+      "https://auth.onesa.test/",
+      "audit-chain-user",
+      "audit-chain@onesa.test",
+    );
+    store.invite(user.id, "audit-invite@onesa.test");
+    assert.equal(store.verifyAuditChain().entries, 3);
+
+    assert.throws(
+      () => store.run("UPDATE audit SET detail=? WHERE seq=7", "{}"),
+      /append-only/,
+    );
+    assert.throws(
+      () => store.run("DELETE FROM audit WHERE seq=7"),
+      /append-only/,
+    );
+
+    // Simulate an out-of-band database operator bypassing the application
+    // guard. The next integrity check must detect the altered historical row.
+    store.db.exec("DROP TRIGGER audit_append_only_update");
+    store.run("UPDATE audit SET detail=? WHERE seq=7", '{"tampered":true}');
+    assert.throws(
+      () => store.verifyAuditChain(),
+      /Identity audit integrity failure at sequence 7/,
+    );
+  } finally {
+    store.db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 const env = {
   origin: "https://identity-admin.onesa.test",
   issuer: "https://auth.onesa.test/",
@@ -1048,6 +1099,10 @@ test("rollback replay rejects conflicting or malformed account contacts atomical
     const newcomer = source.register(env.issuer, "provider|new", "new@onesa.test");
     const delta = rollbackDelta(source, "recovery-contacts");
     const baseline = restored.one("SELECT max(seq) AS seq FROM audit").seq;
+    const tampered = structuredClone(delta);
+    tampered.events[0].detail = '{"tampered":true}';
+    assert.throws(() => replayDelta(restored, tampered), /Recovery audit chain integrity failure/);
+    assert.equal(restored.one("SELECT max(seq) AS seq FROM audit").seq, baseline);
 
     const collision = structuredClone(delta);
     collision.changed[0].account.email = "original@onesa.test";
@@ -1072,6 +1127,7 @@ test("rollback replay rejects conflicting or malformed account contacts atomical
     assert.equal(result.replay, false);
     assert.equal(restored.lookup(env.issuer, "provider|new").id, newcomer.id);
     assert.equal(restored.lookup(env.issuer, "provider|new").email, "new@onesa.test");
+    assert.doesNotThrow(() => restored.verifyAuditChain());
   } finally {
     source.db.close();
     restored.db.close();
@@ -1127,6 +1183,7 @@ test("first recovery replay rejects altered or extra provider links atomically",
     assert.equal(restored.lookup(env.issuer, "provider|verified").status, "suspended");
     assert.deepEqual(restored.all("SELECT * FROM links WHERE id=?", id),
       source.all("SELECT * FROM links WHERE id=?", id));
+    assert.doesNotThrow(() => restored.verifyAuditChain());
   } finally {
     source.db.close();
     restored.db.close();

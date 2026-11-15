@@ -407,16 +407,22 @@ export function replayDelta(store, bundle) {
       JSON.stringify(expected) === JSON.stringify(actual),
       "Incomplete changed-account state",
     );
+    check(bundle.version === 2 && typeof bundle.audit_base_hash === "string",
+      "Unsupported or incomplete recovery audit bundle");
+    store.verifyAuditEvents(bundle.events, bundle.audit_base_hash);
     const existing = store.all(
       "SELECT * FROM audit WHERE seq>? ORDER BY seq",
       source.watermark,
     );
     verifyBaselineIntegrity(store, existing.length ? new Set(actual) : new Set());
     if (existing.length) {
+      const eventContent = (rows) => rows.map(({seq,at,actor,action,target,detail}) =>
+        ({seq,at,actor,action,target,detail}));
       check(
-        JSON.stringify(existing) === JSON.stringify(bundle.events),
+        JSON.stringify(eventContent(existing)) === JSON.stringify(eventContent(bundle.events)),
         "Recovery target has divergent writes",
       );
+      store.verifyAuditChain();
       // An already replayed journal must not preserve browser credentials or
       // unused invitations that might have been restored from an old backup.
       check(
@@ -510,16 +516,9 @@ export function replayDelta(store, bundle) {
       !store.one("SELECT 1 FROM accounts GROUP BY email COLLATE NOCASE HAVING count(*)>1 LIMIT 1"),
       "Conflicting recovered contact ownership",
     );
-    for (const e of bundle.events)
-      store.run(
-        "INSERT INTO audit VALUES(?,?,?,?,?,?)",
-        e.seq,
-        e.at,
-        e.actor,
-        e.action,
-        e.target,
-        e.detail,
-      );
+    for (const e of bundle.events) store.appendAuditEvent(e);
+    // Verify the complete restored chain before the recovery transaction can commit.
+    store.verifyAuditChain();
     clearResolvedProofs(store);
     store.run("DELETE FROM sessions");
     store.run("DELETE FROM invites");
@@ -542,10 +541,11 @@ export function rollbackDelta(store, key) {
       grants: store.all("SELECT * FROM grants WHERE id=?", id),
     }));
     return {
-      version: 1,
+      version: 2,
       snapshot: key,
       fingerprint: source.digest,
       watermark: source.watermark,
+      audit_base_hash: store.one("SELECT entry_hash FROM audit WHERE seq=?", source.watermark)?.entry_hash ?? "",
       events,
       changed,
     };
