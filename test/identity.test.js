@@ -250,6 +250,36 @@ test("Portal administrator has no Identity access; stale MFA and forged form den
     403,
   );
 });
+test("Identity administration rejects an active grant with any role other than admin", async (t) => {
+  const { store, call } = await fixture(t);
+  const user = store.register(env.issuer, "fixture|malformed-identity-role", "malformed-role@onesa.test");
+  store.change("test", user.id, 1, { kind: "status", status: "active" });
+  // The SQLite table intentionally cannot encode the JavaScript product-role
+  // catalog as a CHECK constraint. Simulate a corrupted or legacy row at the
+  // authorization boundary and prove it cannot confer administrator access.
+  store.run(
+    "INSERT INTO grants VALUES(?,?,?,?)",
+    user.id,
+    "identity",
+    "viewer",
+    "active",
+  );
+  const token = "malformed-identity-role-session";
+  store.run(
+    "INSERT INTO sessions VALUES(?,?,?,?,?)",
+    digest(token),
+    user.id,
+    "csrf",
+    Date.now() + 1800000,
+    Date.now(),
+  );
+  const response = await call("/admin", "GET", undefined, {
+    cookie: "__Host-onesa-session=" + token,
+  });
+  assert.equal(response.status, 403);
+  assert.match(await response.text(), /Identity administrator required/);
+});
+
 test("administrators cannot invite an address already owned by a pending or suspended account", async (t) => {
   const { store, call, login } = await fixture(t);
   const pending = store.register(env.issuer, "fixture|pending-existing", "pending-existing@onesa.test");
