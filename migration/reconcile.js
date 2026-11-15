@@ -61,8 +61,7 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
       "Additional source snapshots require explicit reconciliation",
     );
     const pending = [],
-      ids = new Set(),
-      emails = new Set();
+      ids = new Set();
     let count = 0;
     for (const u of snapshot.accounts) {
       // A legacy snapshot can contain multiple accounts sharing a case-variant
@@ -74,7 +73,7 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
           !ids.has(u.id) &&
           email.length <= 254 &&
           /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) &&
-          !emails.has(email) &&
+          !store.one("SELECT 1 FROM accounts WHERE email=? COLLATE NOCASE", email) &&
           ["active", "suspended"].includes(u.status),
         "Conflicting account snapshot",
       );
@@ -83,7 +82,6 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         "Unknown Portal role",
       );
       ids.add(u.id);
-      emails.add(email);
       store.run(
         "INSERT INTO accounts(id,email,status) VALUES(?,?,?)",
         u.id,
