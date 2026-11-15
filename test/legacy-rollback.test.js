@@ -62,30 +62,22 @@ test(
       suspended = randomUUID(),
       held = randomUUID(),
       drone = randomUUID(),
-      docsUser = randomUUID(),
       member = randomUUID(),
-      memberEnabled = randomUUID(),
-      memberDisabled = randomUUID(),
       unrelated = randomUUID(),
       trip = randomUUID(),
       approval = randomUUID(),
       tenant = randomUUID();
-    const ids = [staff, admin, suspended, held, drone, docsUser];
+    const ids = [staff, admin, suspended, held, drone];
     ids.forEach((id, i) =>
-      query(`INSERT INTO users(id,email,password_hash,role) VALUES ('${id}','u${i}@example.test','fixture-existing-hash','${["editor", "administrator", "member", "member", "member", "member"][i]}');
+      query(`INSERT INTO users(id,email,password_hash,role) VALUES ('${id}','u${i}@example.test','fixture-existing-hash','${["editor", "administrator", "member", "member", "member"][i]}');
     INSERT INTO identity_profiles(user_id,display_name,email_verified_at) VALUES('${id}','Fixture',now())`),
     );
     query(`INSERT INTO identity_product_access(user_id,product,role,status) VALUES('${staff}','robot','operator','active'),('${suspended}','ai','user','active'),('${drone}','drone','admin','active');
     INSERT INTO identity_drone_memberships VALUES('${drone}','${tenant}','operator','Tenant');
     INSERT INTO engineering_memberships(id,email,enabled,access_policy_evidence,approved_by) VALUES
       ('${member}','u0@example.test',true,'legacy-approval','${admin}'),
-      ('${memberEnabled}','docs-user@example.test',true,'legacy-approval','${admin}'),
-      ('${memberDisabled}','docs-user-disabled@example.test',false,'legacy-approval','${admin}'),
       ('${unrelated}','orphan@example.test',true,'unlinked','${admin}');
-    INSERT INTO identity_engineering_links(membership_id,user_id) VALUES
-      ('${member}','${staff}'),
-      ('${memberEnabled}','${docsUser}'),
-      ('${memberDisabled}','${docsUser}');
+    INSERT INTO identity_engineering_links(membership_id,user_id) VALUES('${member}','${staff}');
     INSERT INTO access_registrations(id,email,audience,display_name,state,reviewed_by) VALUES('${approval}','u0@example.test','engineering','Existing','approved','${admin}');
     INSERT INTO engineering_enrollment_accounts VALUES('${approval}','${staff}');
     INSERT INTO sessions(token_hash,user_id,csrf,expires_at) VALUES('session','${staff}','csrf',now()+interval '1 hour');
@@ -161,7 +153,7 @@ test(
         "pending@example.test",
       );
       identity.invite(admin, "invitee@example.test");
-      const continuity = [staff, admin, suspended, drone, docsUser].map((id) => ({
+      const continuity = [staff, admin, suspended, drone].map((id) => ({
         id,
         receipt: "custodied-dual-proof-" + id,
       }));
@@ -188,6 +180,10 @@ test(
         /does not match/,
       );
       assert.equal(plan.version, 2);
+      assert.deepEqual(
+        plan.rows.find((row) => row.account.id === staff).docs_memberships,
+        [{ membership_id: member, enabled: false }],
+      );
       const obsoletePlan = {
         ...plan,
         version: 1,
@@ -299,18 +295,10 @@ test(
       );
       assert.equal(
         query("SELECT count(*) FROM engineering_memberships WHERE enabled"),
-        "1",
+        "0",
       );
       assert.equal(
         query(`SELECT enabled FROM engineering_memberships WHERE id='${member}'`),
-        "f",
-      );
-      assert.equal(
-        query(`SELECT enabled FROM engineering_memberships WHERE id='${memberEnabled}'`),
-        "t",
-      );
-      assert.equal(
-        query(`SELECT enabled FROM engineering_memberships WHERE id='${memberDisabled}'`),
         "f",
       );
       assert.equal(
