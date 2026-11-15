@@ -129,7 +129,8 @@ export function createApp(store, env, client = authClient(env)) {
         product = "engineering-documents";
       }
       const grant = store.activeGrant(actor.id, product);
-      if (!grant) return new Response(null, { status: 403 });
+      if (!grant || !products[product]?.includes(grant.role))
+        return new Response(null, { status: 403 });
       return Response.json({
         user_id: actor.id,
         product,
