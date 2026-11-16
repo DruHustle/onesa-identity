@@ -1,0 +1,52 @@
+{
+  "borders": {
+    "buttons_style": "rounded",
+    "button_border_radius": 8,
+    "button_border_weight": 1,
+    "inputs_style": "rounded",
+    "input_border_radius": 8,
+    "input_border_weight": 1,
+    "widget_corner_radius": 16,
+    "widget_border_weight": 1,
+    "show_widget_shadow": false
+  },
+  "colors": {
+    "primary_button": "#2366D1",
+    "primary_button_label": "#FFFFFF",
+    "header": "#10263E",
+    "body_text": "#56677B",
+    "links_focused_components": "#2366D1",
+    "input_background": "#FFFFFF",
+    "input_filled_text": "#10263E",
+    "input_border": "#6E7D90",
+    "input_labels_placeholders": "#56677B",
+    "widget_background": "#FFFFFF",
+    "widget_border": "#DAE1E9",
+    "secondary_button_label": "#10263E",
+    "secondary_button_border": "#6E7D90",
+    "icons": "#56677B",
+    "error": "#912B2B",
+    "success": "#14552D"
+  },
+  "fonts": {
+    "reference_text_size": 16,
+    "links_style": "underlined",
+    "body_text": { "bold": false, "size": 100 },
+    "buttons_text": { "bold": true, "size": 100 },
+    "input_labels": { "bold": false, "size": 100 },
+    "links": { "bold": false, "size": 100 },
+    "subtitle": { "bold": false, "size": 100 },
+    "title": { "bold": true, "size": 150 }
+  },
+  "page_background": {
+    "background_color": "#F5F7FA",
+    "page_layout": "center"
+  },
+  "widget": {
+    "header_text_alignment": "center",
+    "logo_height": 48,
+    "logo_position": "center",
+    "logo_url": "https://onesa.eu/brand/icons/v1/onesa-company-180.png",
+    "social_buttons_layout": "bottom"
+  }
+}
