@@ -1,0 +1,46 @@
+name: onesa-identity-production
+
+services:
+  identity:
+    image: "${IDENTITY_IMAGE:?Set the locally built, commit-tagged Identity image}"
+    pull_policy: never
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      OIDC_ISSUER: https://auth.onesa.eu/
+      IDENTITY_ORIGIN: "${IDENTITY_ORIGIN:?Set the HTTPS origin registered for the Account callback}"
+      OIDC_CLIENT_ID: "${OIDC_CLIENT_ID:?Set the confidential Account client ID}"
+      OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      ACTION_POLICY_KEY_FILE: /run/secrets/action_policy_key
+      AUTH0_DATABASE_CONNECTION: "${AUTH0_DATABASE_CONNECTION:-}"
+      RESOURCE_CLIENTS_JSON: "${RESOURCE_CLIENTS_JSON:?Set the reviewed product audience and client registry}"
+      IDENTITY_DATABASE: /data/identity.sqlite
+      IDENTITY_STORE_MODE: existing
+      PORT: "8080"
+    ports:
+      - "127.0.0.1:${IDENTITY_HOST_PORT:?Set the reserved loopback port}:8080"
+    volumes:
+      - type: bind
+        source: "${IDENTITY_VOLUME:?Set the private directory containing the commissioned identity.sqlite}"
+        target: /data
+        bind:
+          create_host_path: false
+    secrets:
+      - oidc_client_secret
+      - action_policy_key
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/readyz').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+secrets:
+  oidc_client_secret:
+    file: "${OIDC_CLIENT_SECRET_PATH:?Set the private path to the Account client secret}"
+  action_policy_key:
+    file: "${ACTION_POLICY_KEY_PATH:?Set the private path to the shared Auth0 Action policy key}"
