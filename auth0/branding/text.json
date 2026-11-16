@@ -1,0 +1,26 @@
+{
+  "en": {
+    "login": {
+      "title": "Sign in to Onesa",
+      "description": "Use your Onesa account to continue to ${clientName}.",
+      "signupActionLinkText": "Create an Onesa account"
+    },
+    "signup": {
+      "title": "Create an Onesa account",
+      "description": "Register to request access to ${clientName}.",
+      "loginActionLinkText": "Sign in to Onesa"
+    }
+  },
+  "de": {
+    "login": {
+      "title": "Bei Onesa anmelden",
+      "description": "Melden Sie sich mit Ihrem Onesa-Konto an, um ${clientName} zu öffnen.",
+      "signupActionLinkText": "Onesa-Konto erstellen"
+    },
+    "signup": {
+      "title": "Onesa-Konto erstellen",
+      "description": "Registrieren Sie sich, um Zugriff auf ${clientName} zu beantragen.",
+      "loginActionLinkText": "Bei Onesa anmelden"
+    }
+  }
+}
