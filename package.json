@@ -7,7 +7,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node --test test/*.test.js",
     "check": "node --check src/server.js && node --check src/store.js && node --check src/web.js && node --check migration/reconcile.js && node --check auth0/post-login.cjs && node --check auth0/step-up.cjs && node --check migration/link-proof.js && node --check migration/identity-admin.js"
   },
   "dependencies": {
