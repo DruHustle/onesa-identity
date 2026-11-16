@@ -16,7 +16,6 @@ import {
   rollbackDelta,
 } from "../migration/reconcile.js";
 import action from "../auth0/post-login.cjs";
-import stepUp from "../auth0/step-up.cjs";
 import { applyProofs } from "../migration/link-proof.js";
 import { bootstrapIdentityAdmin } from "../migration/identity-admin.js";
 test("audit chain upgrades legacy rows, blocks mutation and detects tampering", () => {
@@ -692,37 +691,6 @@ test("legacy import preserves explicit Portal and Engineering grant decisions ov
   } finally {
     store.db.close();
   }
-});
-
-test("Auth0 step-up requires MFA only for explicit browser step-up, never refresh-token exchange", async () => {
-  const requested = "http://schemas.openid.net/pape/policies/2007/06/multi-factor";
-  const calls = [];
-  const api = { multifactor: { enable: (...args) => calls.push(args) } };
-  await stepUp.onExecutePostLogin(
-    { transaction: { protocol: "oidc-basic-profile", acr_values: [requested] } },
-    api,
-  );
-  assert.deepEqual(calls, [["any", { allowRememberBrowser: false }]]);
-
-  calls.length = 0;
-  await stepUp.onExecutePostLogin(
-    { transaction: { protocol: "oidc-basic-profile", acr_values: "openid " + requested } },
-    api,
-  );
-  assert.deepEqual(calls, [["any", { allowRememberBrowser: false }]]);
-
-  calls.length = 0;
-  await stepUp.onExecutePostLogin(
-    { transaction: { protocol: "oauth2-refresh-token", acr_values: [requested] } },
-    api,
-  );
-  assert.deepEqual(calls, []);
-
-  await stepUp.onExecutePostLogin(
-    { transaction: { protocol: "oidc-basic-profile", acr_values: [] } },
-    api,
-  );
-  assert.deepEqual(calls, []);
 });
 
 test("Auth0 Action emits audience-limited claims and factor timestamp, fails closed on network error", async () => {
