@@ -150,6 +150,12 @@ export function createApp(store, env, client = authClient(env)) {
     if (url.origin !== env.origin) return page("Unknown origin", "", 400);
     if (p === "/health" && method === "GET")
       return Response.json({ status: "ok" });
+    if (!store.currentFile())
+      return new Response(null, { status: 503 });
+    if (p === "/readyz" && method === "GET") {
+      store.one("SELECT id FROM accounts LIMIT 1");
+      return Response.json({ service: "onesa-identity", ready: true });
+    }
     if (p === "/internal/decision" && method === "POST") {
       if (!compare(req.headers.get("authorization"), "Bearer " + env.policyKey))
         return new Response(null, { status: 401 });

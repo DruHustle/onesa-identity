@@ -46,3 +46,5 @@ jobs:
           LEGACY_PORTAL_TEST_URL: postgresql://identity_test:ci-only-disposable@127.0.0.1:${{ job.services.postgres.ports[5432] }}/identity_rollback_test
           LEGACY_PORTAL_TEST_MIGRATIONS: ${{ github.workspace }}/portal-schema/onesa-company-portal-backend/migrations
         run: npm test
+      - name: Recreate the Oracle service with its private store and mounted credentials
+        run: bash test/oracle-compose-smoke.sh

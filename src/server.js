@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
 import { openStore, products } from "./store.js";
@@ -8,6 +9,16 @@ export function configuration(env) {
     if (!env[k]) throw Error(k + " is required");
     return env[k];
   };
+  function credential(key) {
+    const path = env[key + "_FILE"];
+    if (!path) return required(key);
+    if (env[key]) throw Error("Set only one source for " + key);
+    const value = readFileSync(path, "utf8").replace(/\r?\n$/, "");
+    if (!value || /[\r\n\0]/.test(value)) throw Error("Invalid credential file for " + key);
+    return value;
+  }
+  const storeMode = env.IDENTITY_STORE_MODE ?? "create";
+  if (!["create", "existing"].includes(storeMode)) throw Error("Invalid IDENTITY_STORE_MODE");
   const issuer = new URL(required("OIDC_ISSUER")),
     origin = new URL(required("IDENTITY_ORIGIN"));
   for (const u of [issuer, origin])
@@ -56,14 +67,15 @@ export function configuration(env) {
       throw Error("Invalid resource registry");
     resources.set(audience, resource);
   }
-  const policyKey = required("ACTION_POLICY_KEY");
+  const policyKey = credential("ACTION_POLICY_KEY");
   if (policyKey.length < 32)
     throw Error("ACTION_POLICY_KEY must be high entropy");
   return {
     issuer: issuer.href,
     origin: origin.origin,
     clientId: required("OIDC_CLIENT_ID"),
-    clientSecret: required("OIDC_CLIENT_SECRET"),
+    clientSecret: credential("OIDC_CLIENT_SECRET"),
+    requireExistingStore: storeMode === "existing",
     resources,
     policyKey,
     connection: env.AUTH0_DATABASE_CONNECTION,
@@ -78,7 +90,7 @@ if (
   const env = configuration(process.env);
   if (!process.env.IDENTITY_DATABASE)
     throw Error("IDENTITY_DATABASE is required");
-  const store = openStore(process.env.IDENTITY_DATABASE),
+  const store = openStore(process.env.IDENTITY_DATABASE, { existingOnly: env.requireExistingStore }),
     app = createApp(store, env);
   createServer(async (incoming, out) => {
     try {

@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
@@ -57,8 +59,25 @@ const check = (condition, message) => {
   if (!condition) throw new Rejected(message);
 };
 
-export function openStore(path) {
-  const db = new DatabaseSync(path);
+export function openStore(path, { existingOnly = false } = {}) {
+  const mounted = existingOnly ? statSync(path, { bigint: true }) : null;
+  const uri = existingOnly ? pathToFileURL(path) : null;
+  if (uri) uri.searchParams.set("mode", "rw");
+  const db = new DatabaseSync(uri ? uri.href : path);
+  function currentFile() {
+    if (!mounted) return true;
+    const current = statSync(path, { bigint: true, throwIfNoEntry: false });
+    return current?.dev === mounted.dev && current.ino === mounted.ino;
+  }
+  if (existingOnly) {
+    try {
+      const tables = db.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE type='table' AND name IN ('accounts','links','grants','audit')").get();
+      if (!currentFile() || tables.n !== 4) throw Error("Expected an existing Onesa Identity policy store");
+    } catch (error) {
+      db.close();
+      throw error;
+    }
+  }
   db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
     CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY, email TEXT NOT NULL,
       status TEXT NOT NULL CHECK(status IN ('pending','active','suspended','rejected')),
@@ -374,6 +393,7 @@ export function openStore(path) {
     });
   }
   return {
+    currentFile,
     db,
     one,
     all,
