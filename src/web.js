@@ -1,6 +1,6 @@
 import * as oidc from "openid-client";
 import { timingSafeEqual } from "node:crypto";
-import { secret, digest, Rejected, products } from "./store.js";
+import { secret, digest, Rejected, products, accountProducts } from "./store.js";
 
 const esc = (value) =>
   String(value ?? "").replace(
@@ -26,15 +26,36 @@ const readCookie = (req, key) =>
     .split(/;\s*/)
     .find((c) => c.startsWith("__Host-onesa-" + key + "="))
     ?.split("=")[1] ?? "";
-const page = (title, body, status = 200) =>
-  new Response(
-    '<!doctype html><html lang="en"><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1"><title>' +
-      esc(title) +
-      ' · Onesa Identity</title><style>body{font:1rem/1.5 system-ui;max-width:68rem;margin:2rem auto;padding:0 1rem;color:#132a35;background:#f8fafb}main,article{background:white;padding:1rem;border:1px solid #cfdae0;border-radius:.5rem;margin-bottom:1rem}label{display:inline-grid;margin:.3rem;gap:.2rem}button,input,select{font:inherit;padding:.4rem}nav{margin:1rem 0}code{overflow-wrap:anywhere}</style><header>Onesa Identity</header><nav><a href="/account">My account</a> · <a href="/admin">Administration</a></nav><main><h1>' +
-      esc(title) +
-      "</h1>" +
-      body +
-      "</main></html>",
+const page = (title, body, status = 200, wide = false) =>
+  new Response(`<!doctype html><html lang="en"><head>
+    <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>${esc(title)} · Onesa Account</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 24px clamp(16px, 5vw, 64px) 48px; background: #f5f7fa; color: #10263e; font: 1rem/1.55 Arial, Helvetica, sans-serif; }
+      header { max-width: 68rem; margin: 0 auto 36px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+      header > a { display: flex; align-items: center; gap: 10px; color: #10263e; font-weight: 600; text-decoration: none; }
+      header img { width: 32px; height: 32px; }
+      main { margin: auto; max-width: 38rem; padding: clamp(22px, 5vw, 36px); background: white; border: 1px solid #d4dce5; border-radius: 16px; overflow-wrap: anywhere; }
+      main.wide { max-width: 68rem; }
+      h1 { margin: 0 0 16px; font-size: clamp(1.75rem, 5vw, 2.25rem); line-height: 1.12; letter-spacing: -.045em; }
+      h2 { margin: 1.5rem 0 .5rem; font-size: 1.25rem; }
+      p { margin: 0 0 1rem; }
+      .muted { color: #56677b; }
+      article { margin: 1rem 0; padding: 1rem; border: 1px solid #d4dce5; border-radius: 6px; }
+      .actions, nav, .products li { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1.25rem; }
+      .products { padding: 0; list-style: none; }
+      .products li { justify-content: space-between; padding: .7rem 0; border-bottom: 1px solid #d4dce5; }
+      label { display: inline-grid; max-width: 100%; margin: .3rem; gap: .2rem; }
+      a { color: #1a51ac; text-underline-offset: 3px; }
+      input, select, button, .primary { max-width: 100%; min-height: 44px; padding: .55rem .75rem; font: inherit; border: 1px solid #6e7d90; border-radius: 6px; background: white; color: #10263e; }
+      button, .primary { cursor: pointer; }
+      .primary { display: inline-flex; align-items: center; background: #2366d1; border-color: #2366d1; color: white; text-decoration: none; }
+      :is(a, button, input, select):focus-visible { outline: 2px solid #2366d1; outline-offset: 3px; }
+    </style></head><body>
+    <header><a href="/account"><img src="https://onesa.eu/brand/icons/v1/onesa-company-180.png" alt="" width="32" height="32">Onesa Account</a>
+    <nav aria-label="Account"><a href="/account">My account</a><a href="/admin">Administration</a></nav></header>
+    <main${wide ? ' class="wide"' : ""}><h1>${esc(title)}</h1>${body}</main></body></html>`,
     { status, headers: { "content-type": "text/html; charset=utf-8" } },
   );
 const redirect = (url, cookies = []) => {
@@ -98,6 +119,30 @@ export function authClient(env, transport) {
   };
 }
 export function createApp(store, env, client = authClient(env)) {
+  const connectedProducts = new Set(Array.from(env.resources.values(), item => item.product));
+  function productAccess(session) {
+    const decisions = new Map(store.all(
+      "SELECT product,status,role FROM grants WHERE id=?", session.id,
+    ).map(row => [row.product, row]));
+    const statusLabels = { pending: "Awaiting approval", active: "Approved", revoked: "Access removed", rejected: "Request declined" };
+    const rows = [];
+    for (const [product, { name }] of accountProducts) {
+      const legacy = product === "internal-documents" && decisions.get("engineering-documents");
+      const decision = decisions.get(product) || legacy;
+      if (!decision && !connectedProducts.has(product)) continue;
+      const label = legacy && !decisions.has(product) ? "Internal Documents (Engineering)" : name;
+      let control;
+      if (decision) {
+        control = '<span>' + esc(statusLabels[decision.status]) +
+          (decision.status === "active" ? ' · ' + esc(decision.role) : '') + '</span>';
+      } else {
+        control = post("/account/access", session.csrf, hidden("product", product) +
+          '<button aria-label="Request access to ' + esc(name) + '">Request access</button>');
+      }
+      rows.push("<li><strong>" + esc(label) + "</strong>" + control + "</li>");
+    }
+    return rows.length ? '<h2>Product access</h2><ul class="products">' + rows.join("") + '</ul>' : '';
+  }
   async function handle(req) {
     const url = new URL(req.url),
       p = url.pathname,
@@ -270,9 +315,13 @@ export function createApp(store, env, client = authClient(env)) {
       if (method !== "GET") return new Response(null, { status: 405 });
       if (!session) {
         if (p === "/admin") return redirect("/login?return=/admin");
+        const invite = url.searchParams.get("invite");
+        const suffix = invite && /^[\w-]{43}$/.test(invite) ? "?invite=" + encodeURIComponent(invite) : "";
         return page(
-          "Your Onesa account",
-          '<a href="/login">Sign in with Onesa</a> · <a href="/register">Register</a>',
+          "Sign in to Onesa",
+          '<p class="muted">Use your existing Onesa account to access your approved products.</p>' +
+          '<div class="actions"><a class="primary" href="/login' + suffix + '">Sign in to Onesa</a>' +
+          '<a href="/register' + suffix + '">Create an Onesa account</a></div>',
         );
       }
       if (p !== "/admin")
@@ -282,7 +331,10 @@ export function createApp(store, env, client = authClient(env)) {
             esc(session.email) +
             " · " +
             esc(session.state) +
-            '</p><p><a href="/verify-factor">Verify or enroll a second factor</a></p>' +
+            '</p>' +
+            (session.state === "pending" ? '<p>Your account is awaiting administrator approval.</p>' : '') +
+            productAccess(session) +
+            '<h2>Account security</h2><p><a href="/verify-factor">Verify or enroll a second factor</a></p>' +
             (env.connection
               ? post(
                   "/account/recovery",
@@ -300,6 +352,13 @@ export function createApp(store, env, client = authClient(env)) {
       form = new URLSearchParams(await req.text());
       if (!compare(form.get("csrf"), session.csrf))
         return new Response(null, { status: 403 });
+      if (p === "/account/access") {
+        const product = form.get("product");
+        if (!connectedProducts.has(product) || !accountProducts.has(product))
+          return page("Product unavailable", '<a href="/account">Return to your account</a>', 400);
+        store.requestAccess(session.id, product);
+        return redirect("/account");
+      }
       if (p === "/account/recovery" && env.connection) {
         const recoveryNow = Date.now();
         const claimed = store.run(
@@ -452,6 +511,7 @@ export function createApp(store, env, client = authClient(env)) {
           "<h2>Recent audit history</h2><ol>" +
           history +
           "</ol>",
+        200, true,
       );
     }
     if (p === "/admin/invite" && method === "POST") {
@@ -494,7 +554,7 @@ export function createApp(store, env, client = authClient(env)) {
     response.headers.set("x-content-type-options", "nosniff");
     response.headers.set(
       "content-security-policy",
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      "default-src 'none'; img-src https://onesa.eu/brand/icons/v1/onesa-company-180.png; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     );
     return response;
   };
