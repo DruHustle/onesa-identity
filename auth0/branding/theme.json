@@ -16,6 +16,7 @@
     "header": "#10263E",
     "body_text": "#56677B",
     "links_focused_components": "#2366D1",
+    "base_focus_color": "#2366D1",
     "input_background": "#FFFFFF",
     "input_filled_text": "#10263E",
     "input_border": "#6E7D90",
