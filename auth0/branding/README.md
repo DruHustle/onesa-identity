@@ -2,6 +2,8 @@
 
 The production Auth0 Universal Login theme uses the Company Portal logo, colors, card and field shapes. English and German overrides cover the combined and identifier-first sign-in and registration screens. The application name is supplied by Auth0 for each transaction. Credential entry, MFA, recovery, account linking and approval follow their existing flows.
 
+In the production Auth0 tenant language settings, keep English (`en`) as the default and enable German (`de`). Auth0 selects a supported language for each transaction using the requested `ui_locales` or the browser language. The branding sync manages translations for both languages; language enablement and the default remain tenant settings. [Auth0 Universal Login internationalization](https://auth0.com/docs/customize/internationalization-and-localization/universal-login-internationalization)
+
 From the repository root with Node 24, supply a short-lived Onesa management token in the environment through your credential manager. Use audience `https://onesa.eu.auth0.com/api/v2/` with `read:branding` and `read:prompts`; applying changes also requires `update:branding` and `update:prompts`.
 
 ```sh
