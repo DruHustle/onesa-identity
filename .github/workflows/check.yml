@@ -31,7 +31,7 @@ jobs:
       - name: Check out reviewed Portal migrations
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          repository: DruHustle/onesa-company-portal
+          repository: DruHustle/onesa-portal
           ref: aa0b6b8c58da91e535631edfaa42d556d766c727
           path: portal-schema
           sparse-checkout: onesa-company-portal-backend/migrations
