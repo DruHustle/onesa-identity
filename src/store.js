@@ -23,6 +23,19 @@ export const products = {
   ],
   pasofi: ["customer", "agent", "support", "admin"],
 };
+// Self-service requests use the lowest product role. Administrators assign operational roles.
+export const accountProducts = new Map([
+  ["portal", { name: "Company Portal", role: "viewer" }],
+  ["internal-documents", { name: "Internal Documents", role: "viewer" }],
+  ["factory", { name: "Smart Factory", role: "user" }],
+  ["logistics", { name: "Smart Logistics", role: "user" }],
+  ["farmer", { name: "Smart Farmer", role: "user" }],
+  ["ai", { name: "Onesa AI Platform", role: "user" }],
+  ["drone", { name: "Onesa Drone", role: "viewer" }],
+  ["robot", { name: "Onesa Robot", role: "viewer" }],
+  ["mobile", { name: "Onesa Mobile", role: "customer" }],
+  ["pasofi", { name: "PasoFi", role: "customer" }],
+]);
 export const uuid = (value) =>
   typeof value === "string" &&
   /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value);
@@ -295,6 +308,25 @@ export function openStore(path) {
       return token;
     });
   }
+  function requestAccess(id, product) {
+    return atomic(() => {
+      const requested = accountProducts.get(product);
+      check(requested, "Product unavailable");
+      const account = one("SELECT status FROM accounts WHERE id=?", id);
+      check(account && ["active", "pending"].includes(account.status), "Account unavailable");
+      // A canonical Documents record would supersede the existing Engineering decision.
+      if (product === "internal-documents" &&
+          one("SELECT 1 FROM grants WHERE id=? AND product='engineering-documents'", id)) return;
+      const inserted = run(
+        "INSERT INTO grants(id,product,role,status) VALUES(?,?,?,'pending') ON CONFLICT(id,product) DO NOTHING",
+        id, product, requested.role,
+      );
+      if (inserted.changes) {
+        run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
+        audit(id, "request-product-access", id, { product, role: requested.role });
+      }
+    });
+  }
   function change(actor, id, revision, operation) {
     return atomic(() => {
       const current = one("SELECT * FROM accounts WHERE id=?", id);
@@ -354,6 +386,7 @@ export function openStore(path) {
     lookup,
     activeGrant,
     register,
+    requestAccess,
     invite,
     change,
   };

@@ -197,6 +197,73 @@ async function fixture(t, overrides = {}) {
   });
   return { store, call, login, admin, setRedeem: (next) => { redeem = next ?? defaultRedeem; } };
 }
+test("the Onesa Account entry preserves invitations for sign-in and registration", async (t) => {
+  const { call, store } = await fixture(t);
+  const invitation = store.invite("identity-admin", "invitee@onesa.test");
+  const account = await call("/account?invite=" + invitation);
+  const html = await account.text();
+  assert.match(html, /<h1>Sign in to Onesa<\/h1>/);
+  assert.ok(html.includes('href="/login?invite=' + invitation + '"'));
+  assert.ok(html.includes('href="/register?invite=' + invitation + '">Create an Onesa account'));
+  assert.doesNotMatch(html, /type="password"/);
+  for (const [path, hint] of [["/login", null], ["/register", "signup"]]) {
+    const start = await call(path + "?invite=" + invitation);
+    const location = new URL(start.headers.get("location"));
+    assert.equal(location.origin + location.pathname, env.issuer + "authorize");
+    assert.equal(location.searchParams.get("screen_hint"), hint);
+    assert.equal(location.searchParams.get("code_challenge_method"), "S256");
+    assert.equal(location.searchParams.get("redirect_uri"), env.origin + "/callback");
+  }
+});
+
+test("self-service requests preserve account ownership and require an independent approval", async (t) => {
+  const { call, store, login, admin } = await fixture(t);
+  const first = await login("portal-member", "/account");
+  const subject = "oidc|portal-member";
+  const account = store.lookup(env.issuer, subject);
+  const accountPage = () => call("/account", "GET", undefined, { cookie: first.cookie });
+  const html = await (await accountPage()).text();
+  assert.match(html, /awaiting administrator approval/);
+  assert.match(html, /Request access to Smart Farmer/);
+  const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
+  const request = (product, token = csrf, origin = env.origin) =>
+    call("/account/access", "POST", new URLSearchParams({ product, csrf: token, role: "admin", id: admin.id }),
+      { cookie: first.cookie, origin });
+  const decide = () => call("/internal/decision", "POST", JSON.stringify({
+    subject, audience: "https://api.farmer.onesa.eu", client: "farmer-web",
+  }), { authorization: "Bearer " + env.policyKey });
+
+  assert.equal((await request("farmer", "bad-token")).status, 403);
+  assert.equal((await request("farmer", csrf, "https://elsewhere.test")).status, 403);
+  assert.equal((await request("identity")).status, 400);
+  assert.equal((await request("robot")).status, 400);
+  const asked = await request("farmer");
+  assert.equal(asked.status, 303);
+  assert.equal(asked.headers.get("location"), "/account");
+  assert.equal((await request("farmer")).status, 303);
+  assert.equal(store.lookup(env.issuer, subject).revision, 2);
+  assert.equal(store.one("SELECT count(*) AS n FROM audit WHERE action='request-product-access'").n, 1);
+  assert.deepEqual({ ...store.one("SELECT role,status FROM grants WHERE id=? AND product='farmer'", account.id) },
+    { role: "user", status: "pending" });
+  assert.equal(store.one("SELECT 1 FROM grants WHERE id=? AND product='farmer'", admin.id), undefined);
+  assert.match(await (await accountPage()).text(), /Smart Farmer<\/strong><span>Awaiting approval/);
+  assert.equal((await decide()).status, 403);
+  store.change(admin.id, account.id, 2, { kind: "status", status: "active" });
+  assert.equal((await decide()).status, 403);
+  store.change(admin.id, account.id, 3, { kind: "grant", product: "farmer", role: "user", status: "active" });
+  assert.deepEqual(await (await decide()).json(), { user_id: account.id, product: "farmer", roles: ["user"] });
+  store.change(admin.id, account.id, 4, { kind: "grant", product: "farmer", role: "user", status: "revoked" });
+  assert.equal((await request("farmer")).status, 303);
+  assert.equal((await decide()).status, 403);
+  assert.equal(store.lookup(env.issuer, subject).revision, 5);
+  store.change(admin.id, account.id, 5, { kind: "grant", product: "engineering-documents", role: "viewer", status: "active" });
+  assert.equal((await request("internal-documents")).status, 303);
+  assert.equal(store.one("SELECT 1 FROM grants WHERE id=? AND product='internal-documents'", account.id), undefined);
+  assert.match(await (await accountPage()).text(), /Internal Documents \(Engineering\)/);
+  await login("portal-member", "/account");
+  assert.equal(store.lookup(env.issuer, subject).id, account.id);
+});
+
 test("Identity UI changes grant, revocation and suspension at next issuance; resources scoped to client/audience", async (t) => {
   const { store, call, login } = await fixture(t),
     a = await login("identity-admin"),
