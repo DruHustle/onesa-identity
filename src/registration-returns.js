@@ -17,10 +17,14 @@ production.portal = { web: { user: "https://portal.onesa.eu/account/registered",
   admin: "https://portal.onesa.eu/account/registered?audience=admin" } };
 production["internal-documents"] = { web: "https://docs.internal.onesa.eu/registration/return" };
 
+// Auth0 remains the issuer on auth.onesa.eu. A DNS-only provider domain
+// must not be intercepted by the application; use the separate Account origin.
+const productionAccountOrigins = new Set(["https://account.onesa.eu", "https://auth.onesa.eu"]);
+
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
 export const returnKey = (product, platform, tier) => [product, platform, tier].join("/");
 export function registrationReturns(origin, override) {
-  const entries = override ? JSON.parse(override) : origin === "https://auth.onesa.eu" ? production : {};
+  const entries = override ? JSON.parse(override) : productionAccountOrigins.has(origin) ? production : {};
   if (!object(entries)) throw Error("Invalid registration return registry");
   const results = new Map();
   for (const [product, platforms] of Object.entries(entries)) {
