@@ -375,6 +375,8 @@ export function openStore(path, { existingOnly = false } = {}) {
       check(requested, "Product unavailable");
       const account = one("SELECT status FROM accounts WHERE id=?", id);
       check(account && ["active", "pending"].includes(account.status), "Account unavailable");
+      // A delayed form submission must not replace already approved shared entry with a pending override.
+      if (sharedRole(product, registrations(db, id), false)) return;
       // A canonical Documents record would supersede the existing Engineering decision.
       if (product === "internal-documents" &&
           one("SELECT 1 FROM grants WHERE id=? AND product='engineering-documents'", id)) return;

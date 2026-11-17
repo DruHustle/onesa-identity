@@ -272,9 +272,16 @@ test("one verified signup and independent review give product-scoped user or adm
         assert.equal(Boolean(decision.portal_staff_registration), tier === "admin" && product === "portal");
       }
     }
+    store.requestAccess(account.id, "ai");
+    assert.equal(store.one("SELECT 1 FROM grants WHERE id=? AND product='ai'", account.id), undefined);
+    assert.equal((await decide("ai")).status, 200);
     assert.equal(store.activeGrant(account.id, "identity"), undefined);
     const current = () => store.lookup(env.issuer, subject).revision;
     if (tier === "admin") {
+      const resource = resources.get("https://factory.test");
+      delete resource.sharedAdminRole;
+      assert.deepEqual((await (await decide("factory")).json()).roles, ["user"]);
+      resource.sharedAdminRole = "admin";
       store.change(admin.id, account.id, current(), { kind: "grant", product: "portal", role: "administrator", status: "active" });
       assert.equal((await (await decide("portal")).json()).portal_staff_registration, undefined);
     }
