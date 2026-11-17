@@ -60,6 +60,7 @@ exports.onExecutePostLogin = async (event, api) => {
     .filter(Number.isFinite);
   const latest = observed.length ? Math.max(...observed) : 0;
   const mfaTime = latest > 0 && latest <= Date.now() ? Math.floor(latest / 1000) : 0;
+  if (decision.require_mfa === true && (!mfaTime || Math.floor(Date.now() / 1000) - mfaTime > 300)) return deny();
   const transaction = event.transaction || {};
   const requested = Array.isArray(transaction.acr_values)
     ? transaction.acr_values
@@ -81,6 +82,9 @@ exports.onExecutePostLogin = async (event, api) => {
   if (!decision.user_id || !decision.product || !Array.isArray(decision.roles))
     return deny();
   if (mfaTime) api.accessToken.setCustomClaim(ns + "mfa_time", mfaTime);
+  if (decision.portal_staff_registration === true && decision.product === "portal" &&
+      decision.require_mfa === true && decision.roles.length === 1 && decision.roles[0] === "administrator")
+    api.accessToken.setCustomClaim(ns + "portal_staff_registration", true);
   if (operation)
     api.accessToken.setCustomClaim(ns + "operation_mfa_nonce", transaction.metadata.onesa_operation_mfa_nonce);
   for (const [name, value] of Object.entries({

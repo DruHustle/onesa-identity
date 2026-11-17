@@ -8,9 +8,9 @@ export const products = {
   portal: ["owner", "administrator", "editor", "business", "hr", "viewer"],
   "internal-documents": ["viewer", "editor", "admin"],
   "engineering-documents": ["viewer", "editor", "admin"],
-  farmer: ["user"],
-  logistics: ["user"],
-  factory: ["user"],
+  farmer: ["user", "admin"],
+  logistics: ["user", "admin"],
+  factory: ["user", "admin"],
   ai: ["user", "admin"],
   drone: ["viewer", "operator", "admin"],
   robot: ["viewer", "operator", "admin"],
@@ -38,6 +38,32 @@ export const accountProducts = new Map([
   ["mobile", { name: "Onesa Mobile", role: "customer" }],
   ["pasofi", { name: "PasoFi", role: "customer" }],
 ]);
+// Staff tools and Identity governance require their own explicit grants.
+export const sharedProducts = new Set(["factory", "logistics", "farmer", "ai", "drone", "robot", "mobile", "pasofi"]);
+export const configurableAdminRoles = new Set(["factory", "logistics", "farmer"]);
+
+// The immutable account journal is already backed up and replayed with each stable identity.
+// A later decision replaces that tier's earlier state. A declined or removed request cannot
+// silently reopen through another registration or login.
+export function registrations(db, id) {
+  const rows = db.prepare("SELECT detail FROM audit WHERE target=? AND action='shared-registration' ORDER BY seq").all(id);
+  const result = new Map();
+  for (const row of rows) {
+    const { tier, status } = JSON.parse(row.detail);
+    result.set(tier, status);
+  }
+  return result;
+}
+export function sharedRole(product, tiers, adminRoleEnabled) {
+  if (product === "portal") return tiers.get("admin") === "active" ? "administrator" : null;
+  if (!sharedProducts.has(product)) return null;
+  if (tiers.get("admin") === "active") {
+    const elevated = !configurableAdminRoles.has(product) || adminRoleEnabled;
+    return elevated ? "admin" : accountProducts.get(product).role;
+  }
+  return tiers.get("user") === "active" ? accountProducts.get(product).role : null;
+}
+
 export const uuid = (value) =>
   typeof value === "string" &&
   /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value);
@@ -181,6 +207,7 @@ export function openStore(path, { existingOnly = false } = {}) {
       BEGIN SELECT RAISE(ABORT, 'Identity audit log is append-only'); END;
   `);
   verifyAuditChain();
+  db.exec("CREATE INDEX IF NOT EXISTS audit_shared_registrations ON audit(target,seq) WHERE action='shared-registration'");
 
   const audit = (actor, action, id, detail = {}) => {
     const previousRow = one(
@@ -233,7 +260,20 @@ export function openStore(path, { existingOnly = false } = {}) {
       id,
       product,
     );
-  function register(issuer, sub, email, invitation = "") {
+  function recordRequest(id, tier, existing = true) {
+    check(tier === "user" || tier === "admin", "Invalid registration type");
+    if (registrations(db, id).has(tier)) return;
+    audit(id, "shared-registration", id, { tier, status: "pending" });
+    if (existing) run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
+  }
+  function requestRegistration(id, tier) {
+    return atomic(() => {
+      const account = one("SELECT status FROM accounts WHERE id=?", id);
+      check(["active", "pending"].includes(account?.status), "Account unavailable");
+      recordRequest(id, tier);
+    });
+  }
+  function register(issuer, sub, email, invitation = "", tier) {
     return atomic(() => {
       check(
         typeof email === "string" &&
@@ -258,6 +298,7 @@ export function openStore(path, { existingOnly = false } = {}) {
             issuer,
           });
         }
+        if (tier && ["active", "pending"].includes(linked.status)) recordRequest(linked.id, tier);
         return lookup(issuer, sub);
       }
       // A legacy address match demands separately verified immutable ownership.
@@ -292,6 +333,7 @@ export function openStore(path, { existingOnly = false } = {}) {
       audit(id, invite ? "accept-invitation" : "register", id, {
         status: "pending",
       });
+      if (tier !== undefined) recordRequest(id, tier ?? "user", false);
       return lookup(issuer, sub);
     });
   }
@@ -333,6 +375,8 @@ export function openStore(path, { existingOnly = false } = {}) {
       check(requested, "Product unavailable");
       const account = one("SELECT status FROM accounts WHERE id=?", id);
       check(account && ["active", "pending"].includes(account.status), "Account unavailable");
+      // A delayed form submission must not replace already approved shared entry with a pending override.
+      if (sharedRole(product, registrations(db, id), false)) return;
       // A canonical Documents record would supersede the existing Engineering decision.
       if (product === "internal-documents" &&
           one("SELECT 1 FROM grants WHERE id=? AND product='engineering-documents'", id)) return;
@@ -368,6 +412,17 @@ export function openStore(path, { existingOnly = false } = {}) {
         run("UPDATE accounts SET status=? WHERE id=?", operation.status, id);
         if (operation.status !== "active")
           run("DELETE FROM sessions WHERE id=?", id);
+      } else if (operation.kind === "registration") {
+        check(actor !== id && activeGrant(actor, "identity")?.role === "admin", "Independent Identity administrator required");
+        const previous = registrations(db, id).get(operation.tier);
+        check(previous && (
+          (["pending", "revoked", "rejected"].includes(previous) && operation.status === "active") ||
+          (previous === "pending" && operation.status === "rejected") ||
+          (previous === "active" && operation.status === "revoked")
+        ), "Invalid registration decision");
+        audit(actor, "shared-registration", id, { tier: operation.tier, status: operation.status });
+        run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
+        return;
       } else if (operation.kind === "review") {
         const requested = accountProducts.get(operation.product);
         check(requested && requested.role === operation.role, "Invalid requested role");
@@ -416,6 +471,7 @@ export function openStore(path, { existingOnly = false } = {}) {
     activeGrant,
     register,
     requestAccess,
+    requestRegistration,
     invite,
     change,
   };

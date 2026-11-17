@@ -139,3 +139,43 @@ test("provider history from before the operation is rejected even within the sam
   assert.equal(f.denials.length, 1);
   assert.deepEqual(f.claims, {});
 });
+
+
+test("normal shared-admin login without an ACR challenges before issuing the approved product role", async t => {
+  let response = { ...decision, product: "ai", require_mfa: true };
+  t.mock.method(globalThis, "fetch", async () => Response.json(response));
+  const f = fixture();
+  f.transaction.acr_values = [];
+  f.transaction.prompt = [];
+  f.event.authentication.methods = [];
+  await stepUp.onExecutePostLogin(f.event, f.api);
+  assert.deepEqual(f.challenges, [[{ type: "otp" }]]);
+  await policy.onExecutePostLogin(f.event, f.api);
+  assert.equal(f.denials.length, 1);
+  assert.deepEqual(f.claims, {});
+  f.event.authentication.methods.push({ name: "mfa", timestamp: new Date().toISOString() });
+  await policy.onExecutePostLogin(f.event, f.api);
+  assert.deepEqual(f.claims[ns + "roles"], ["admin"]);
+  assert.deepEqual(f.claims[ns + "products"], ["ai"]);
+  response = { ...decision, roles: ["administrator"], require_mfa: true, portal_staff_registration: true };
+  await policy.onExecutePostLogin(f.event, f.api);
+  assert.equal(f.claims[ns + "portal_staff_registration"], true);
+  const normal = fixture();
+  normal.transaction.acr_values = [];
+  normal.event.authentication.methods = [];
+  response = { ...decision, product: "ai", roles: ["user"] };
+  await stepUp.onExecutePostLogin(normal.event, normal.api);
+  await policy.onExecutePostLogin(normal.event, normal.api);
+  assert.equal(normal.challenges.length, 0);
+  assert.deepEqual(normal.claims[ns + "roles"], ["user"]);
+});
+
+test("hosted signup is accepted only for the Identity Account client", async () => {
+  const { default: action } = await import("../auth0/pre-registration.cjs");
+  for (const [client, transaction, expected] of [["account", {}, 0], ["product", {}, 1], ["account", undefined, 1]]) {
+    const denied = [];
+    await action.onExecutePreUserRegistration({ client: { client_id: client }, transaction,
+      secrets: { ACCOUNT_CLIENT_ID: "account" } }, { access: { deny: code => denied.push(code) } });
+    assert.equal(denied.length, expected);
+  }
+});

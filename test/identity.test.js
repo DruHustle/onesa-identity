@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openStore, digest, products } from "../src/store.js";
+import { openStore, digest, products, registrations, accountProducts } from "../src/store.js";
 import { createApp } from "../src/web.js";
 import { configuration } from "../src/server.js";
 import {
@@ -213,6 +213,88 @@ test("the Onesa Account entry preserves invitations for sign-in and registration
     assert.equal(location.searchParams.get("code_challenge_method"), "S256");
     assert.equal(location.searchParams.get("redirect_uri"), env.origin + "/callback");
   }
+});
+
+test("one verified signup and independent review give product-scoped user or admin access", async t => {
+  const resources = new Map([...accountProducts.keys()].map(product =>
+    ["https://" + product + ".test", { product, clients: [product], ...(["factory", "farmer", "logistics"].includes(product) ? { sharedAdminRole: "admin" } : {}) }]));
+  const { call, store, login, setRedeem, admin } = await fixture(t, { resources });
+  const administrator = await login("identity-admin");
+  const adminHeaders = { cookie: administrator.cookie, origin: env.origin };
+  for (const tier of ["user", "admin"]) {
+    const subject = "oidc|new-" + tier;
+    const email = "new-" + tier + "@onesa.test";
+    const apply = async (verified, route) => {
+      setRedeem(async () => ({ iss: env.issuer, sub: subject, email, email_verified: verified }));
+      const started = await call(route);
+      const state = new URL(started.headers.get("location")).searchParams.get("state");
+      return call("/callback?code=fixture&state=" + state, "GET", undefined, {
+        cookie: started.headers.getSetCookie()[0].split(";")[0],
+      });
+    };
+    const signup = tier === "user" ? "/register" : "/register?audience=admin";
+    const unverified = await apply(false, signup);
+    assert.equal(unverified.status, 403);
+    const retry = (await unverified.text()).match(/href="(\/login\?audience=[^"]+)"/)[1];
+    assert.equal(retry, "/login?audience=" + tier);
+    assert.equal(store.lookup(env.issuer, subject), undefined);
+    const done = await apply(true, retry);
+    assert.equal(done.status, 303);
+    assert.equal(done.headers.get("location"), "/account");
+    const account = store.lookup(env.issuer, subject);
+    assert.equal(registrations(store.db, account.id).get(tier), "pending");
+    async function decide(product, client = product) {
+      return call("/internal/decision", "POST", JSON.stringify({ subject, audience: "https://" + product + ".test", client }),
+        { authorization: "Bearer " + env.policyKey });
+    }
+    assert.equal((await decide("ai")).status, 403);
+    async function change(kind, status) {
+      const page = await (await call("/admin?id=" + account.id, "GET", undefined, adminHeaders)).text();
+      assert.ok(page.includes('name="tier" value="' + tier + '"'));
+      const csrf = page.match(/name="csrf" value="([^"]+)"/)[1];
+      const revision = store.lookup(env.issuer, subject).revision;
+      return call("/admin/change", "POST", new URLSearchParams({ id: account.id, revision, csrf, kind, tier, status }), adminHeaders);
+    }
+    assert.equal((await change("status", "active")).status, 303);
+    assert.equal((await decide("ai")).status, 403);
+    assert.equal((await change("registration", "active")).status, 303);
+    assert.equal((await decide("ai", "other-product")).status, 403);
+    for (const [product, entry] of accountProducts) {
+      const response = await decide(product);
+      if (product === "internal-documents" || (product === "portal" && tier === "user")) {
+        assert.equal(response.status, 403);
+      } else {
+        assert.equal(response.status, 200, product);
+        const decision = await response.json();
+        assert.equal(decision.user_id, account.id);
+        assert.deepEqual(decision.roles, [tier === "admin" ? (product === "portal" ? "administrator" : "admin") : entry.role]);
+        assert.equal(Boolean(decision.require_mfa), tier === "admin");
+        assert.equal(Boolean(decision.portal_staff_registration), tier === "admin" && product === "portal");
+      }
+    }
+    store.requestAccess(account.id, "ai");
+    assert.equal(store.one("SELECT 1 FROM grants WHERE id=? AND product='ai'", account.id), undefined);
+    assert.equal((await decide("ai")).status, 200);
+    assert.equal(store.activeGrant(account.id, "identity"), undefined);
+    const current = () => store.lookup(env.issuer, subject).revision;
+    if (tier === "admin") {
+      const resource = resources.get("https://factory.test");
+      delete resource.sharedAdminRole;
+      assert.deepEqual((await (await decide("factory")).json()).roles, ["user"]);
+      resource.sharedAdminRole = "admin";
+      store.change(admin.id, account.id, current(), { kind: "grant", product: "portal", role: "administrator", status: "active" });
+      assert.equal((await (await decide("portal")).json()).portal_staff_registration, undefined);
+    }
+    store.change(admin.id, account.id, current(), { kind: "grant", product: "drone", role: "viewer", status: "revoked" });
+    await apply(true, signup);
+    assert.equal((await decide("drone")).status, 403);
+    assert.equal((await change("registration", "revoked")).status, 303);
+    await apply(true, signup);
+    assert.equal(registrations(store.db, account.id).get(tier), "revoked");
+    assert.equal((await decide("ai")).status, 403);
+  }
+  assert.equal((await call("/register?audience=other")).status, 400);
+  assert.equal((await call("/register?audience=user&audience=admin")).status, 400);
 });
 
 test("self-service requests preserve account ownership and require an independent approval", async (t) => {
@@ -643,8 +725,11 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
       id: owner, issuer: env.issuer, subject: "provider|owner",
       method: "dual-authentication", receipt: "verified-after-cutover",
     }]);
+    x.requestRegistration(newUser.id, "admin");
     const delta = rollbackDelta(x, "pilot");
     replayDelta(y, delta);
+    assert.deepEqual([...registrations(y.db, newUser.id)], [["admin", "pending"]]);
+    assert.equal(registrations(y.db, owner).size, 0);
     assert.equal(y.activeGrant(second, "farmer"), undefined);
     assert.equal(y.activeGrant(newUser.id, "farmer").role, "user");
     assert.equal(y.lookup(env.issuer, "provider|new").id, newUser.id);
@@ -1069,7 +1154,7 @@ test("transient OIDC token-exchange failure preserves the one-use invitation for
     "GET", undefined, { cookie: flow },
   );
   assert.equal(failed.status, 503);
-  assert.ok((await failed.text()).includes('href="/login?invite=' + invitation + '"'));
+  assert.ok((await failed.text()).includes('href="/login?audience=user&amp;invite=' + invitation + '"'));
   assert.equal(store.one("SELECT count(*) AS n FROM invites").n, 1);
   assert.equal(store.one("SELECT count(*) AS n FROM accounts WHERE email='identity-admin@onesa.test'").n, 1);
 
@@ -1079,7 +1164,7 @@ test("transient OIDC token-exchange failure preserves the one-use invitation for
     email_verified: true,
     email: "new-invitee@onesa.test",
   }));
-  const retry = await call("/login?invite=" + invitation);
+  const retry = await call("/login?audience=user&invite=" + invitation);
   const retryParams = new URL(retry.headers.get("location")).searchParams;
   const retryFlow = retry.headers.getSetCookie()[0].split(";")[0];
   const completed = await call(
@@ -1106,8 +1191,8 @@ test("provider cancellation retry preserves invitation and restricts return dest
   );
   assert.equal(cancelled.status, 403);
   const html = await cancelled.text();
-  assert.ok(html.includes('href="/login?invite=' + invitation + '"'));
-  const restarted = await call("/login?invite=" + invitation);
+  assert.ok(html.includes('href="/login?audience=user&amp;invite=' + invitation + '"'));
+  const restarted = await call("/login?audience=user&invite=" + invitation);
   const params = new URL(restarted.headers.get("location")).searchParams;
   const retryFlow = restarted.headers.getSetCookie()[0].split(";")[0];
   const success = await call(

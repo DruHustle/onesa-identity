@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
-import { openStore, products } from "./store.js";
+import { openStore, products, configurableAdminRoles } from "./store.js";
 import { createApp } from "./web.js";
 
 export function configuration(env) {
@@ -53,6 +53,8 @@ export function configuration(env) {
       Array.isArray(resource) ||
       !Object.hasOwn(products, resource.product) ||
       resource.product === "identity" ||
+      (resource.sharedAdminRole !== undefined &&
+        (!configurableAdminRoles.has(resource.product) || resource.sharedAdminRole !== "admin")) ||
       !Array.isArray(resource.clients) ||
       !resource.clients.length ||
       resource.clients.some(

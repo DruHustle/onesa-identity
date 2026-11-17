@@ -1,6 +1,6 @@
 import * as oidc from "openid-client";
 import { timingSafeEqual } from "node:crypto";
-import { secret, digest, Rejected, products, accountProducts } from "./store.js";
+import { secret, digest, Rejected, products, accountProducts, registrations, sharedRole, configurableAdminRoles } from "./store.js";
 
 const esc = (value) =>
   String(value ?? "").replace(
@@ -66,6 +66,9 @@ const redirect = (url, cookies = []) => {
 const retryPath = (destination, origin) => {
   const target = new URL(destination, origin);
   const invite = target.searchParams.get("invite");
+  const tier = target.searchParams.get("enrollment");
+  if (tier === "admin" || tier === "user")
+    return "/login?audience=" + tier + (invite ? "&invite=" + encodeURIComponent(invite) : "");
   if (invite && /^[A-Za-z0-9_-]{43}$/.test(invite))
     return "/login?invite=" + encodeURIComponent(invite);
   return target.pathname === "/admin" ? "/login?return=%2Fadmin" : "/login";
@@ -120,7 +123,10 @@ export function authClient(env, transport) {
 }
 export function createApp(store, env, client = authClient(env)) {
   const connectedProducts = new Set(Array.from(env.resources.values(), item => item.product));
+  const adminEnabled = new Set(Array.from(env.resources.values())
+    .filter(resource => resource.sharedAdminRole === "admin").map(resource => resource.product));
   function productAccess(session) {
+    const tiers = registrations(store.db, session.id);
     const decisions = new Map(store.all(
       "SELECT product,status,role FROM grants WHERE id=?", session.id,
     ).map(row => [row.product, row]));
@@ -128,7 +134,9 @@ export function createApp(store, env, client = authClient(env)) {
     const rows = [];
     for (const [product, { name }] of accountProducts) {
       const legacy = product === "internal-documents" && decisions.get("engineering-documents");
-      const decision = decisions.get(product) || legacy;
+      let decision = decisions.get(product) || legacy;
+      const inherited = connectedProducts.has(product) && sharedRole(product, tiers, adminEnabled.has(product));
+      if (!decision && inherited) decision = { status: "active", role: inherited };
       if (!decision && !connectedProducts.has(product)) continue;
       const label = legacy && !decisions.has(product) ? "Internal Documents (Engineering)" : name;
       let control;
@@ -142,6 +150,15 @@ export function createApp(store, env, client = authClient(env)) {
       rows.push("<li><strong>" + esc(label) + "</strong>" + control + "</li>");
     }
     return rows.length ? '<h2>Product access</h2><ul class="products">' + rows.join("") + '</ul>' : '';
+  }
+  function registrationPanel(session) {
+    const states = registrations(store.db, session.id);
+    const labels = { pending: "Awaiting review", active: "Approved", rejected: "Declined", revoked: "Access removed" };
+    return "<h2>Onesa registration</h2>" + ["user", "admin"].map(tier => {
+      const title = tier === "admin" ? "Administrator" : "User";
+      return states.has(tier) ? "<p>" + title + " · " + esc(labels[states.get(tier)]) + "</p>" :
+        post("/account/enrollment", session.csrf, hidden("tier", tier) + "<button>Request " + title.toLowerCase() + " registration</button>");
+    }).join("");
   }
   async function handle(req) {
     const url = new URL(req.url),
@@ -179,13 +196,21 @@ export function createApp(store, env, client = authClient(env)) {
           !store.one("SELECT 1 FROM grants WHERE id=? AND product=?", actor.id, product)) {
         product = "engineering-documents";
       }
-      const grant = store.activeGrant(actor.id, product);
-      if (!grant || !products[product]?.includes(grant.role))
+      if (actor.status !== "active") return new Response(null, { status: 403 });
+      const explicit = store.one("SELECT role,status FROM grants WHERE id=? AND product=?", actor.id, product);
+      const role = explicit
+        ? (explicit.status === "active" && explicit.role)
+        : sharedRole(product, registrations(store.db, actor.id), resource.sharedAdminRole === "admin");
+      if (!role || !products[product]?.includes(role) ||
+          (role === "admin" && configurableAdminRoles.has(product) && resource.sharedAdminRole !== "admin"))
         return new Response(null, { status: 403 });
       return Response.json({
         user_id: actor.id,
         product,
-        roles: [grant.role],
+        roles: [role],
+        ...(!explicit && product === "portal" && role === "administrator" ? { portal_staff_registration: true } : {}),
+        ...((!explicit && (role === "admin" || role === "administrator")) ||
+          (configurableAdminRoles.has(product) && role === "admin") ? { require_mfa: true } : {}),
       });
     }
     const login = [
@@ -206,6 +231,14 @@ export function createApp(store, env, client = authClient(env)) {
       const invitation = url.searchParams.get("invite");
       if (invitation && /^[\w-]{43}$/.test(invitation))
         destination = "/account?invite=" + invitation;
+      if (p === "/register" || (p === "/login" && url.searchParams.has("audience"))) {
+        const tier = url.searchParams.get("audience") ?? "user";
+        if (!["user", "admin"].includes(tier) || url.searchParams.getAll("audience").length > 1)
+          return page("Choose a registration type", '<a href="/account">Return to Onesa Account</a>', 400);
+        const stored = new URL(destination, env.origin);
+        stored.searchParams.set("enrollment", tier);
+        destination = stored.pathname + stored.search;
+      }
       const params = {
         response_type: "code",
         redirect_uri: env.origin + "/callback",
@@ -251,7 +284,7 @@ export function createApp(store, env, client = authClient(env)) {
       if (url.searchParams.get("error")) {
         return page(
           "Sign-in unavailable",
-          '<a href="' + retryPath(flow.destination, env.origin) + '">Try again</a>',
+          '<a href="' + esc(retryPath(flow.destination, env.origin)) + '">Try again</a>',
           403,
         );
       }
@@ -264,7 +297,7 @@ export function createApp(store, env, client = authClient(env)) {
         // OIDC verification fails transiently.
         return page(
           "Sign-in temporarily unavailable",
-          '<a href="' + retryPath(flow.destination, env.origin) + '">Try again</a>',
+          '<a href="' + esc(retryPath(flow.destination, env.origin)) + '">Try again</a>',
           503,
         );
       }
@@ -277,7 +310,7 @@ export function createApp(store, env, client = authClient(env)) {
         return page(
           "Verify your email",
           'Use the verification message from Onesa Identity, then sign in again. <a href="' +
-            retryPath(flow.destination, env.origin) +
+            esc(retryPath(flow.destination, env.origin)) +
             '">Continue sign-in</a>',
           403,
         );
@@ -287,7 +320,9 @@ export function createApp(store, env, client = authClient(env)) {
         identity.sub,
         identity.email,
         target.searchParams.get("invite") || "",
+        target.searchParams.get("enrollment"),
       );
+      target.searchParams.delete("enrollment");
       if (["suspended", "rejected"].includes(user.status))
         return page("Account unavailable", "", 403);
       const session = secret(),
@@ -327,7 +362,8 @@ export function createApp(store, env, client = authClient(env)) {
           "Sign in to Onesa",
           '<p class="muted">Use your existing Onesa account to access your approved products.</p>' +
           '<div class="actions"><a class="primary" href="/login' + suffix + '">Sign in to Onesa</a>' +
-          '<a href="/register' + suffix + '">Create an Onesa account</a></div>',
+          '<a href="/register' + suffix + '">Create an Onesa account</a>' +
+          '<a href="/register?audience=admin' + (suffix ? '&amp;' + suffix.slice(1) : '') + '">Request administrator registration</a></div>',
         );
       }
       if (p !== "/admin")
@@ -339,7 +375,7 @@ export function createApp(store, env, client = authClient(env)) {
             esc(session.state) +
             '</p>' +
             (session.state === "pending" ? '<p>Your account is awaiting administrator approval.</p>' : '') +
-            productAccess(session) +
+            registrationPanel(session) + productAccess(session) +
             '<h2>Account security</h2><p><a href="/verify-factor">Verify or enroll a second factor</a></p>' +
             (env.connection
               ? post(
@@ -358,6 +394,10 @@ export function createApp(store, env, client = authClient(env)) {
       form = new URLSearchParams(await req.text());
       if (!compare(form.get("csrf"), session.csrf))
         return new Response(null, { status: 403 });
+      if (p === "/account/enrollment") {
+        store.requestRegistration(session.id, form.get("tier"));
+        return redirect("/account");
+      }
       if (p === "/account/access") {
         const product = form.get("product");
         if (!connectedProducts.has(product) || !accountProducts.has(product))
@@ -441,6 +481,15 @@ export function createApp(store, env, client = authClient(env)) {
       const panels = shown
         .map((u) => {
           const base = hidden("id", u.id) + hidden("revision", u.revision);
+          const enrollmentReviews = [...registrations(store.db, u.id)].map(([tier, status]) => {
+            const title = tier === "admin" ? "Shared administrator registration" : "Shared user registration";
+            if (session.id === u.id) return "<p>" + title + " · " + esc(status) + "</p>";
+            const buttons = status === "active" ? '<button name="status" value="revoked">Remove access</button>'
+              : '<button name="status" value="active">Approve registration</button>' +
+                (status === "pending" ? ' <button name="status" value="rejected">Decline</button>' : '');
+            return post("/admin/change", session.csrf, base + hidden("kind", "registration") + hidden("tier", tier) +
+              "<fieldset><legend>" + title + " · " + esc(status) + "</legend>" + buttons + "</fieldset>");
+          }).join("");
           const grants = store.all("SELECT product,role,status FROM grants WHERE id=? ORDER BY product", u.id);
           const reviews = grants.filter(g =>
             g.status === "pending" && accountProducts.get(g.product)?.role === g.role,
@@ -469,7 +518,7 @@ export function createApp(store, env, client = authClient(env)) {
                 options(["active", "suspended", "pending", "rejected"], u.status) +
                 "</select></label><button>Update account</button>",
             ) +
-            reviews +
+            enrollmentReviews + reviews +
             post(
               "/admin/change",
               session.csrf,
@@ -537,6 +586,7 @@ export function createApp(store, env, client = authClient(env)) {
       const [product, role] = (form.get("assignment") || "").split("/");
       store.change(session.id, form.get("id"), Number(form.get("revision")), {
         kind: form.get("kind"),
+        ...(form.get("kind") === "registration" ? { tier: form.get("tier") } : {}),
         product,
         role,
         status: form.get("status"),

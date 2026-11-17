@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { openStore, products, digest, uuid } from "../src/store.js";
+import { openStore, products, configurableAdminRoles, digest, uuid } from "../src/store.js";
 
 const check = (ok, msg) => {
   if (!ok) throw Error(msg);
@@ -212,12 +212,11 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         // or access to separately owned document domains.
         pending.push({ kind: "review-product-grant", id: g.id + "/" + g.product });
       } else if (
-        g.product === "portal" &&
-        ["owner", "administrator"].includes(g.role)
+        (g.product === "portal" && ["owner", "administrator"].includes(g.role)) ||
+        (configurableAdminRoles.has(g.product) && g.role === "admin")
       ) {
-        // Legacy global Portal roles require an explicit owner review before
-        // they can become active product access.
-        pending.push({ kind: "review-product-grant", id: g.id + "/portal" });
+        // Legacy elevated roles need an independent decision before issuance.
+        pending.push({ kind: "review-product-grant", id: g.id + "/" + g.product });
         grant({ ...g, status: g.status === "active" ? "pending" : g.status });
       } else {
         grant(g);
