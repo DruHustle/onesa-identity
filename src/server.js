@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
 import { openStore, products, configurableAdminRoles } from "./store.js";
 import { createApp } from "./web.js";
+import { registrationReturns } from "./registration-returns.js";
 
 export function configuration(env) {
   const required = (k) => {
@@ -79,6 +80,7 @@ export function configuration(env) {
     clientSecret: credential("OIDC_CLIENT_SECRET"),
     requireExistingStore: storeMode === "existing",
     resources,
+    registrationReturns: registrationReturns(origin.origin, env.REGISTRATION_RETURNS_JSON),
     policyKey,
     connection: env.AUTH0_DATABASE_CONNECTION,
   };

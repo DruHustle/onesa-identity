@@ -18,6 +18,7 @@ services:
       ACTION_POLICY_KEY_FILE: /run/secrets/action_policy_key
       AUTH0_DATABASE_CONNECTION: "${AUTH0_DATABASE_CONNECTION:-}"
       RESOURCE_CLIENTS_JSON: "${RESOURCE_CLIENTS_JSON:?Set the reviewed product audience and client registry}"
+      REGISTRATION_RETURNS_JSON: "${REGISTRATION_RETURNS_JSON:-}"
       IDENTITY_DATABASE: /data/identity.sqlite
       IDENTITY_STORE_MODE: existing
       PORT: "8080"
