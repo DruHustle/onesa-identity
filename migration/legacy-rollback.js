@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { digest, openStore, products, uuid } from "../src/store.js";
+import { digest, openStore, products, registrations, uuid } from "../src/store.js";
 import { applySnapshot } from "./reconcile.js";
 
 function requireState(value, message) {
@@ -149,6 +149,9 @@ export function prepareLegacyRollback(
         .prepare("SELECT * FROM grants WHERE id=? ORDER BY product")
         .all(id);
       const report = (reason) => issues.push({ id, reason });
+      for (const [tier, state] of registrations(db, id)) {
+        if (state === "active" || state === "pending") report("review-shared-registration/" + tier + "/" + state);
+      }
       const linked = links.some(
         (link) => link.issuer === issuer && link.subject && link.evidence,
       );

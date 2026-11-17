@@ -9,12 +9,37 @@ function values(input) {
   return typeof input === "string" ? input.split(/\s+/) : [];
 }
 
+async function needsSharedMfa(event) {
+  const { POLICY_URL, POLICY_ORIGIN, POLICY_KEY } = event.secrets || {};
+  if (!event.resource_server?.identifier || !event.user?.email_verified ||
+      !POLICY_URL || !POLICY_ORIGIN || !POLICY_KEY) return false;
+  const now = Date.now();
+  if ((event.authentication?.methods || []).some(method => {
+    const timestamp = Date.parse(method.timestamp);
+    return method.name === "mfa" && timestamp <= now && now - timestamp <= 300000;
+  })) return false;
+  const origin = new URL(POLICY_ORIGIN);
+  if (origin.protocol !== "https:" || origin.username || origin.password ||
+      ![origin.origin, origin.origin + "/"].includes(POLICY_ORIGIN) ||
+      POLICY_URL !== origin.origin + "/internal/decision") throw Error("Invalid policy origin");
+  const response = await fetch(POLICY_URL, {
+    method: "POST", redirect: "error", signal: AbortSignal.timeout(3500),
+    headers: { authorization: "Bearer " + POLICY_KEY, "content-type": "application/json" },
+    body: JSON.stringify({ subject: event.user.user_id, audience: event.resource_server.identifier, client: event.client.client_id }),
+  });
+  if (!response.ok) return false; // The issuance Action makes the authoritative decision after MFA.
+  return (await response.json()).require_mfa === true;
+}
+
 exports.onExecutePostLogin = async (event, api) => {
   const transaction = event.transaction || {};
   const requested = values(transaction.acr_values);
   const operation = requested.includes(operationAcr);
-  if (!operation && !requested.includes(mfaAcr)) return;
   if (transaction.protocol === "oauth2-refresh-token") return;
+  if (!operation && !requested.includes(mfaAcr)) {
+    try { if (!await needsSharedMfa(event)) return; }
+    catch { return api.access.deny("Onesa access is temporarily unavailable."); }
+  }
 
   const deny = () => api.access.deny("Onesa could not verify a fresh second factor.");
   const prompts = values(transaction.prompt);
