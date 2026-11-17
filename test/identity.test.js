@@ -218,6 +218,8 @@ test("the Onesa Account entry preserves invitations for sign-in and registration
 
 test("both registration types return to each registered product and platform without transferring Identity credentials", async t => {
   const registry = registrationReturns("https://auth.onesa.eu");
+  // Production Account and the Auth0 provider may use different origins.
+  assert.deepEqual([...registrationReturns("https://account.onesa.eu")], [...registry]);
   assert.equal(registry.size, 52);
   assert.equal(registry.get("portal/web/admin"), "https://portal.onesa.eu/account/registered?audience=admin");
   assert.equal(registry.get("portal/web/user"), "https://portal.onesa.eu/account/registered");
