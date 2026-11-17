@@ -441,13 +441,15 @@ export function createApp(store, env, client = authClient(env)) {
       const panels = shown
         .map((u) => {
           const base = hidden("id", u.id) + hidden("revision", u.revision);
-          const grants = store
-            .all(
-              "SELECT product,role,status FROM grants WHERE id=? ORDER BY product",
-              u.id,
-            )
-            .map((g) => [g.product, g.role, g.status].map(esc).join(" / "))
-            .join(", ");
+          const grants = store.all("SELECT product,role,status FROM grants WHERE id=? ORDER BY product", u.id);
+          const reviews = grants.filter(g =>
+            g.status === "pending" && accountProducts.get(g.product)?.role === g.role,
+          ).map(g => post("/admin/change", session.csrf,
+            base + hidden("kind", "review") + hidden("assignment", g.product + "/" + g.role) +
+            "<fieldset><legend>" + esc(accountProducts.get(g.product).name) + " · " + esc(g.role) +
+            ' access request</legend><button name="status" value="active">Approve</button> ' +
+            '<button name="status" value="rejected">Decline</button></fieldset>',
+          )).join("");
           return (
             "<article><h2>" +
             esc(u.email) +
@@ -456,7 +458,7 @@ export function createApp(store, env, client = authClient(env)) {
             "</code> · " +
             esc(u.status) +
             "</p><p>" +
-            grants +
+            grants.map(g => [g.product, g.role, g.status].map(esc).join(" / ")).join(", ") +
             "</p>" +
             post(
               "/admin/change",
@@ -467,12 +469,14 @@ export function createApp(store, env, client = authClient(env)) {
                 options(["active", "suspended", "pending", "rejected"], u.status) +
                 "</select></label><button>Update account</button>",
             ) +
+            reviews +
             post(
               "/admin/change",
               session.csrf,
               base +
                 hidden("kind", "grant") +
-                '<label>Product and role<select name="assignment">' +
+                '<label>Product and role<select name="assignment" required>' +
+                '<option value="" disabled selected>Choose a product and role</option>' +
                 options(
                   Object.entries(products).flatMap(([product, roles]) =>
                     roles.map((r) => product + "/" + r),

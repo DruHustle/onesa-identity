@@ -263,6 +263,45 @@ test("self-service requests preserve account ownership and require an independen
   assert.equal(store.lookup(env.issuer, subject).id, account.id);
 });
 
+test("an administrator reviews each displayed access request with its recorded role", async (t) => {
+  const { store, call, login } = await fixture(t);
+  const member = store.register(env.issuer, "oidc|member", "member@onesa.test");
+  store.requestAccess(member.id, "farmer");
+  store.requestAccess(member.id, "internal-documents");
+  const admin = await login("identity-admin");
+  const headers = { cookie: admin.cookie, origin: env.origin };
+  const page = async () => (await call("/admin?id=" + member.id, "GET", undefined, headers)).text();
+  function requestForm(html, assignment) {
+    const form = [...html.matchAll(/<form\b[^>]*>([\s\S]*?)<\/form>/g)].map(match => match[1])
+      .find(markup => markup.includes('name="assignment" value="' + assignment + '"'));
+    assert.ok(form?.includes('name="kind" value="review"'));
+    const fields = new URLSearchParams();
+    for (const input of form.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g))
+      fields.set(input[1], input[2]);
+    return { fields, form };
+  }
+  async function submit({ fields, form }, status) {
+    assert.ok(form.includes('<button name="status" value="' + status + '">'));
+    const body = new URLSearchParams(fields);
+    body.set("status", status);
+    return call("/admin/change", "POST", body, headers);
+  }
+  const html = await page();
+  assert.match(html, /<select name="assignment" required><option value="" disabled selected>/);
+  const farmer = requestForm(html, "farmer/user");
+  assert.equal((await submit(farmer, "active")).status, 303);
+  assert.equal((await submit(farmer, "rejected")).status, 409);
+  const docs = requestForm(await page(), "internal-documents/viewer");
+  assert.equal((await submit(docs, "rejected")).status, 303);
+  assert.deepEqual(store.all("SELECT product,role,status FROM grants WHERE id=? ORDER BY product", member.id)
+    .map(row => ({ ...row })), [
+    { product: "farmer", role: "user", status: "active" },
+    { product: "internal-documents", role: "viewer", status: "rejected" },
+  ]);
+  assert.equal(store.lookup(env.issuer, "oidc|member").status, "pending");
+  assert.doesNotMatch(await page(), /name="kind" value="review"/);
+});
+
 test("Identity UI changes grant, revocation and suspension at next issuance; resources scoped to client/audience", async (t) => {
   const { store, call, login } = await fixture(t),
     a = await login("identity-admin"),
