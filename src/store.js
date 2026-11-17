@@ -368,6 +368,15 @@ export function openStore(path, { existingOnly = false } = {}) {
         run("UPDATE accounts SET status=? WHERE id=?", operation.status, id);
         if (operation.status !== "active")
           run("DELETE FROM sessions WHERE id=?", id);
+      } else if (operation.kind === "review") {
+        const requested = accountProducts.get(operation.product);
+        check(requested && requested.role === operation.role, "Invalid requested role");
+        check(["active", "rejected"].includes(operation.status), "Invalid review decision");
+        const result = run(
+          "UPDATE grants SET status=? WHERE id=? AND product=? AND role=? AND status='pending'",
+          operation.status, id, operation.product, operation.role,
+        );
+        check(result.changes === 1, "Request changed; reload before reviewing");
       } else if (operation.kind === "grant") {
         check(
           Object.hasOwn(products, operation.product) &&
