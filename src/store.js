@@ -116,6 +116,8 @@ export function openStore(path, { existingOnly = false } = {}) {
     CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT, detail TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS invites(hash TEXT PRIMARY KEY, email TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS challenges(hash TEXT PRIMARY KEY, state TEXT NOT NULL, nonce TEXT NOT NULL, verifier TEXT NOT NULL, destination TEXT NOT NULL, expires INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS registration_resumes(hash TEXT NOT NULL, state TEXT PRIMARY KEY, destination TEXT NOT NULL, expires INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS registration_resume_browser ON registration_resumes(hash);
     CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY, id TEXT NOT NULL REFERENCES accounts, csrf TEXT NOT NULL, expires INTEGER NOT NULL, mfa_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS recovery_limit(id TEXT PRIMARY KEY REFERENCES accounts, next INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS imports(snapshot TEXT PRIMARY KEY, digest TEXT NOT NULL, watermark INTEGER NOT NULL); `);

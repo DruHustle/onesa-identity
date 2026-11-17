@@ -451,7 +451,7 @@ export function replayDelta(store, bundle) {
       clearResolvedProofs(store);
       store.run("DELETE FROM sessions");
       store.run("DELETE FROM invites");
-      store.run("DELETE FROM challenges");
+      store.db.exec("DELETE FROM challenges; DELETE FROM registration_resumes");
       return { replay: true, accounts: actual.length };
     }
     for (const x of bundle.changed) {
@@ -521,7 +521,7 @@ export function replayDelta(store, bundle) {
     clearResolvedProofs(store);
     store.run("DELETE FROM sessions");
     store.run("DELETE FROM invites");
-    store.run("DELETE FROM challenges");
+    store.db.exec("DELETE FROM challenges; DELETE FROM registration_resumes");
     return { replay: false, accounts: actual.length };
   });
 }

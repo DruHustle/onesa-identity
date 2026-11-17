@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { openStore, digest, products, registrations, accountProducts } from "../src/store.js";
 import { createApp } from "../src/web.js";
 import { configuration } from "../src/server.js";
+import { registrationReturns, returnKey } from "../src/registration-returns.js";
 import {
   applySnapshot,
   replayDelta,
@@ -213,6 +214,85 @@ test("the Onesa Account entry preserves invitations for sign-in and registration
     assert.equal(location.searchParams.get("code_challenge_method"), "S256");
     assert.equal(location.searchParams.get("redirect_uri"), env.origin + "/callback");
   }
+});
+
+test("both registration types return to each registered product and platform without transferring Identity credentials", async t => {
+  const registry = registrationReturns("https://auth.onesa.eu");
+  assert.equal(registry.size, 52);
+  assert.equal(registry.get("portal/web/admin"), "https://portal.onesa.eu/account/registered?audience=admin");
+  assert.equal(registry.get("portal/web/user"), "https://portal.onesa.eu/account/registered");
+  assert.equal(registry.get("internal-documents/web/user"), "https://docs.internal.onesa.eu/registration/return");
+  assert.equal(registry.get("farmer/ios/admin"), "smartfarmer://onesa/registered");
+  const { call, setRedeem } = await fixture(t, { registrationReturns: registry });
+  setRedeem(async () => ({ iss: env.issuer, sub: "oidc|roundtrip", email: "verified@onesa.test", email_verified: true }));
+  for (const [key, exactDestination] of registry) {
+    const [product, platform, audience] = key.split("/");
+    const query = new URLSearchParams({ product, platform, audience, return_to: "https://different.test/" });
+    const start = await call("/register?" + query);
+    assert.equal(start.status, 303, key);
+    const auth = new URL(start.headers.get("location"));
+    assert.equal(auth.searchParams.get("redirect_uri"), env.origin + "/callback");
+    assert.equal(auth.searchParams.get("code_challenge_method"), "S256");
+    assert.equal(auth.searchParams.get("product"), null);
+    const cookies = start.headers.getSetCookie().map(c => c.split(";")[0]).join("; ");
+    const done = await call("/callback?code=fixture&state=" + auth.searchParams.get("state"), "GET", undefined, { cookie: cookies });
+    assert.equal(done.status, 303, key);
+    assert.equal(done.headers.get("location"), exactDestination, key);
+    assert.ok(done.headers.getSetCookie().some(c => c.startsWith("__Host-onesa-session=")));
+    assert.equal((await call("/account/registration/resume", "GET", undefined, { cookie: cookies })).headers.get("location"), "/account");
+  }
+  assert.equal((await call("/register?product=portal&platform=ios")).status, 503);
+  assert.equal((await call("/register?product=unknown")).status, 400);
+  assert.equal(registrationReturns("https://staging.onesa.test").size, 0);
+  const custom = JSON.stringify({ farmer: { web: "https://pilot.onesa.test/auth/registration/complete" } });
+  assert.equal(registrationReturns("https://staging.onesa.test", custom).get(returnKey("farmer", "web", "admin")), "https://pilot.onesa.test/auth/registration/complete");
+  for (const [platform, invalid] of [["web", "http://pilot.onesa.test/"], ["ios", "onesamobile://auth/registered"],
+      ["ios", "smartfarmer://onesa/callback"], ["web", "https://pilot.onesa.test/entry?code=fixture"]])
+    assert.throws(() => registrationReturns(env.origin, JSON.stringify({ farmer: { [platform]: invalid } })));
+});
+
+test("verification and expired login retry resume the original product across two open registration tabs", async t => {
+  const registry = registrationReturns("https://auth.onesa.eu");
+  const { call, store, setRedeem } = await fixture(t, { registrationReturns: registry });
+  const jar = new Map();
+  function remember(response) {
+    for (const header of response.headers.getSetCookie()) {
+      const pair = header.split(";")[0];
+      const key = pair.slice(0, pair.indexOf("="));
+      if (header.includes("Max-Age=0")) jar.delete(key);
+      else jar.set(key, pair);
+    }
+  }
+  async function visit(path) {
+    const response = await call(path, "GET", undefined, { cookie: [...jar.values()].join("; ") });
+    remember(response);
+    return response;
+  }
+  const start = async path => new URL((await visit(path)).headers.get("location")).searchParams.get("state");
+  const signIn = state => visit("/callback?code=fixture&state=" + state);
+  const farmer = await start("/register?product=farmer&platform=ios&audience=admin");
+  const drone = await start("/register?product=drone");
+  const chooser = await visit("/account/registration/resume");
+  assert.equal(chooser.status, 200);
+  const choices = await chooser.text();
+  assert.match(choices, /Smart Farmer · ios · admin/);
+  assert.match(choices, /Onesa Drone · web · user/);
+  setRedeem(async () => ({ iss: env.issuer, sub: "oidc|pilot", email: "pilot@onesa.test", email_verified: false }));
+  const verify = await signIn(farmer);
+  assert.equal(verify.status, 403);
+  assert.match(await verify.text(), /audience=admin&amp;product=farmer&amp;platform=ios/);
+  setRedeem(async () => ({ iss: env.issuer, sub: "oidc|pilot", email: "pilot@onesa.test", email_verified: true }));
+  assert.equal((await signIn(drone)).headers.get("location"), registry.get("drone/web/user"));
+  const resumed = await visit("/account/registration/resume?iss=" + encodeURIComponent(env.issuer));
+  assert.equal(resumed.headers.get("location"), "/login?audience=admin&product=farmer&platform=ios");
+  const newState = await start(resumed.headers.get("location"));
+  store.run("UPDATE challenges SET expires=0 WHERE state=?", newState);
+  const expired = await signIn(newState);
+  assert.equal(expired.status, 400);
+  assert.match(await expired.text(), /audience=admin&amp;product=farmer&amp;platform=ios/);
+  const finalState = await start((await visit("/account/registration/resume")).headers.get("location"));
+  assert.equal((await signIn(finalState)).headers.get("location"), registry.get("farmer/ios/admin"));
+  assert.equal((await visit("/account/registration/resume")).headers.get("location"), "/account");
 });
 
 test("one verified signup and independent review give product-scoped user or admin access", async t => {

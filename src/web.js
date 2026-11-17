@@ -1,4 +1,5 @@
 import * as oidc from "openid-client";
+import { returnKey } from "./registration-returns.js";
 import { timingSafeEqual } from "node:crypto";
 import { secret, digest, Rejected, products, accountProducts, registrations, sharedRole, configurableAdminRoles } from "./store.js";
 
@@ -67,8 +68,12 @@ const retryPath = (destination, origin) => {
   const target = new URL(destination, origin);
   const invite = target.searchParams.get("invite");
   const tier = target.searchParams.get("enrollment");
-  if (tier === "admin" || tier === "user")
-    return "/login?audience=" + tier + (invite ? "&invite=" + encodeURIComponent(invite) : "");
+  if (tier === "admin" || tier === "user") {
+    const query = new URLSearchParams({ audience: tier });
+    for (const key of ["invite", "product", "platform"])
+      if (target.searchParams.has(key)) query.set(key, target.searchParams.get(key));
+    return "/login?" + query;
+  }
   if (invite && /^[A-Za-z0-9_-]{43}$/.test(invite))
     return "/login?invite=" + encodeURIComponent(invite);
   return target.pathname === "/admin" ? "/login?return=%2Fadmin" : "/login";
@@ -122,6 +127,11 @@ export function authClient(env, transport) {
   };
 }
 export function createApp(store, env, client = authClient(env)) {
+  const returns = env.registrationReturns ?? new Map();
+  function browserResumes(req) {
+    return store.all("SELECT state,destination FROM registration_resumes WHERE hash=? AND expires>? ORDER BY expires DESC",
+      digest(readCookie(req, "registration")), Date.now());
+  }
   const connectedProducts = new Set(Array.from(env.resources.values(), item => item.product));
   const adminEnabled = new Set(Array.from(env.resources.values())
     .filter(resource => resource.sharedAdminRole === "admin").map(resource => resource.product));
@@ -213,6 +223,16 @@ export function createApp(store, env, client = authClient(env)) {
           (configurableAdminRoles.has(product) && role === "admin") ? { require_mfa: true } : {}),
       });
     }
+    if (p === "/account/registration/resume" && method === "GET") {
+      const resumes = browserResumes(req);
+      if (resumes.length === 1) return redirect(retryPath(resumes[0].destination, env.origin));
+      if (resumes.length > 1) return page("Continue registration", "<ul>" + resumes.map(({ destination }) => {
+        const target = new URL(destination, env.origin).searchParams;
+        const label = accountProducts.get(target.get("product"))?.name + " · " + target.get("platform") + " · " + target.get("enrollment");
+        return '<li><a href="' + esc(retryPath(destination, env.origin)) + '">' + esc(label) + "</a></li>";
+      }).join("") + "</ul>");
+      return redirect("/account");
+    }
     const login = [
       "/login",
       "/register",
@@ -237,6 +257,16 @@ export function createApp(store, env, client = authClient(env)) {
           return page("Choose a registration type", '<a href="/account">Return to Onesa Account</a>', 400);
         const stored = new URL(destination, env.origin);
         stored.searchParams.set("enrollment", tier);
+        if (url.searchParams.has("product") || url.searchParams.has("platform")) {
+          const product = url.searchParams.get("product"), platform = url.searchParams.get("platform") ?? "web";
+          if (!accountProducts.has(product) || !["web", "ios", "android"].includes(platform) ||
+              url.searchParams.getAll("product").length !== 1 || url.searchParams.getAll("platform").length > 1)
+            return page("Unknown registration entry", '<a href="/account">Continue to Onesa Account</a>', 400);
+          if (!returns.has(returnKey(product, platform, tier)))
+            return page("Product registration unavailable", "The return to your product has not been configured.", 503);
+          stored.searchParams.set("product", product);
+          stored.searchParams.set("platform", platform);
+        }
         destination = stored.pathname + stored.search;
       }
       const params = {
@@ -256,31 +286,35 @@ export function createApp(store, env, client = authClient(env)) {
           "http://schemas.openid.net/pape/policies/2007/06/multi-factor";
       }
       const location = await client.authorize(params);
-      store.run("DELETE FROM challenges WHERE expires<=?", Date.now());
-      store.run(
-        "INSERT INTO challenges VALUES(?,?,?,?,?,?)",
-        digest(token),
-        state,
-        nonce,
-        verifier,
-        destination,
-        Date.now() + 300000,
-      );
-      return redirect(location, [cookie("flow", token, 300)]);
+      const cookies = [cookie("flow", token, 300)];
+      store.atomic(() => {
+        const now = Date.now();
+        store.run("DELETE FROM challenges WHERE expires<=?", now);
+        store.run("INSERT INTO challenges VALUES(?,?,?,?,?,?)", digest(token), state, nonce, verifier, destination, now + 300000);
+        if (new URL(destination, env.origin).searchParams.has("product")) {
+          const resume = browserResumes(req).length ? readCookie(req, "registration") : secret();
+          const browserHash = digest(resume);
+          store.run("DELETE FROM registration_resumes WHERE expires<=? OR (hash=? AND destination=?)", now, browserHash, destination);
+          store.run("INSERT INTO registration_resumes VALUES(?,?,?,?)", browserHash, state, destination, now + 86400000);
+          cookies.push(cookie("flow-" + state, token, 300), cookie("registration", resume, 86400));
+        }
+      });
+      return redirect(location, cookies);
     }
     if (p === "/callback" && method === "GET") {
+      const state = url.searchParams.get("state") || "";
+      const stateCookie = /^[A-Za-z0-9_-]{32,128}$/.test(state) && readCookie(req, "flow-" + state);
       const flow = store.one(
         "DELETE FROM challenges WHERE hash=? AND state=? AND expires>? RETURNING *",
-        digest(readCookie(req, "flow")),
-        url.searchParams.get("state"),
+        digest(stateCookie || readCookie(req, "flow")),
+        state,
         Date.now(),
       );
-      if (!flow)
-        return page(
-          "Sign-in expired",
-          '<a href="/login">Start sign-in again</a>',
-          400,
-        );
+      if (!flow) {
+        const resume = browserResumes(req).find(candidate => candidate.state === state);
+        const retry = resume ? retryPath(resume.destination, env.origin) : "/login";
+        return page("Sign-in expired", '<a href="' + esc(retry) + '">Start sign-in again</a>', 400);
+      }
       if (url.searchParams.get("error")) {
         return page(
           "Sign-in unavailable",
@@ -315,6 +349,11 @@ export function createApp(store, env, client = authClient(env)) {
           403,
         );
       const target = new URL(flow.destination, env.origin);
+      const product = target.searchParams.get("product");
+      const destination = product && returns.get(returnKey(product, target.searchParams.get("platform"),
+        target.searchParams.get("enrollment")));
+      if (product && !destination)
+        return page("Product registration unavailable", "The product return is no longer configured.", 503);
       const user = store.register(
         env.issuer,
         identity.sub,
@@ -342,10 +381,15 @@ export function createApp(store, env, client = authClient(env)) {
         now + 1800000,
         factor,
       );
-      return redirect(target.pathname + target.search, [
-        cookie("session", session, 1800),
-        cookie("flow", "", 0),
-      ]);
+      const cookies = [cookie("session", session, 1800)];
+      if (digest(readCookie(req, "flow")) === flow.hash) cookies.push(cookie("flow", "", 0));
+      if (destination) {
+        const consumed = store.run("DELETE FROM registration_resumes WHERE hash=? AND state=?",
+          digest(readCookie(req, "registration")), flow.state);
+        cookies.push(cookie("flow-" + state, "", 0));
+        if (consumed.changes && !browserResumes(req).length) cookies.push(cookie("registration", "", 0));
+      }
+      return redirect(destination || (target.pathname + target.search), cookies);
     }
     const session = store.one(
       "SELECT s.*,a.email,a.status AS state FROM sessions s JOIN accounts a USING(id) WHERE hash=? AND expires>? AND a.status IN ('active','pending')",
@@ -456,7 +500,8 @@ export function createApp(store, env, client = authClient(env)) {
       }
       if (p === "/logout") {
         store.run("DELETE FROM sessions WHERE hash=?", session.hash);
-        return redirect("/account", [cookie("session", "", 0)]);
+        store.run("DELETE FROM registration_resumes WHERE hash=?", digest(readCookie(req, "registration")));
+        return redirect("/account", [cookie("session", "", 0), cookie("registration", "", 0)]);
       }
     }
     if (!["/admin", "/admin/change", "/admin/invite"].includes(p))
