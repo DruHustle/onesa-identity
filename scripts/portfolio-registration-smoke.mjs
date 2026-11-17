@@ -24,10 +24,19 @@ const cases = [
 async function probe([repo,surface,kind,url]) {
   const row = { repository: "DruHustle/" + repo, surface, status: null, result: "NO-GO", evidence: "NETWORK_ERROR" };
   try {
-    const response = await fetch(url, {
+    let response = await fetch(url, {
       redirect: "manual", signal: AbortSignal.timeout(12000),
       headers: {accept:"text/html,application/json;q=0.8,*/*;q=0.5", "user-agent":"OnesaRegistrationPreflight/1.0"},
     });
+    // Next.js may emit a 307 trailing-slash redirect. Follow only the
+    // approved local signup page, never a provider/auth code redirect.
+    if (kind === "portal" && [301,302,303,307,308].includes(response.status)) {
+      let next = null;
+      try { next = new URL(response.headers.get("location"), url); } catch {}
+      if (next?.origin === "https://portal.onesa.eu" && /^\/account\/register\/?$/.test(next.pathname)) {
+        response = await fetch(next, { redirect:"manual",signal:AbortSignal.timeout(12000) });
+      }
+    }
     row.status = response.status;
     let accepted = false;
     if (kind === "issuer") {
