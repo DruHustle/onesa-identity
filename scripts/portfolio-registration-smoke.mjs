@@ -5,22 +5,38 @@ import { registrationReturns } from "../src/registration-returns.js";
 const account = "https://account.onesa.eu";
 const provider = "https://auth.onesa.eu";
 const targets = registrationReturns(account);
+const products = [
+  ["onesa-company-portal", "portal", ["web"]],
+  ["onesa-security", "security", ["web"]],
+  ["onesa-documents", "internal-documents", ["web"]],
+  ...[["smart-farmer","farmer"],["smart-logistics","logistics"],["smart-factory","factory"],
+      ["onesa-mobile","mobile"],["onesa-ai-platform","ai"],["onesa-drone","drone"],
+      ["onesa-robot","robot"],["pasofi","pasofi"]].map(([repo,product]) => [repo,product,["web","ios","android"]]),
+];
 const cases = [
   ["onesa-identity", "Auth0 issuer", "issuer", provider + "/.well-known/openid-configuration"],
   ["onesa-identity", "Account UI", "account", account + "/account"],
-  ...["portal", "farmer"].flatMap(product => ["user", "admin"].map(tier =>
-    [product === "portal" ? "onesa-company-portal" : "smart-farmer",
-     "Account registration " + product + "/" + tier, "register",
-     account + "/register?audience=" + tier + "&product=" + product + "&platform=web"])),
+  ["onesa-identity", "Account sign in", "authorize", account + "/login"],
+  ...products.flatMap(([repo,product,platforms]) =>
+    ["user","admin"].map(tier =>
+      [repo, "Account registration " + product + "/" + tier, "register",
+       account + "/register?" + new URLSearchParams({audience:tier, product, platform:"web"})])),
   ...["user", "admin"].map(tier =>
     ["onesa-company-portal", "Portal " + tier + " signup", "portal", "https://portal.onesa.eu/account/register?audience=" + tier]),
   ["onesa-documents", "Public Docs", "page", "https://docs.onesa.eu/"],
-  ["onesa-documents", "Internal Docs return", "page", targets.get("internal-documents/web/user")],
-  ...[["smart-farmer","farmer"],["smart-logistics","logistics"],["smart-factory","factory"],
-      ["onesa-mobile","mobile"],["onesa-ai-platform","ai"],["onesa-drone","drone"],
-      ["onesa-robot","robot"],["pasofi","pasofi"]]
+  ["onesa-documents", "Internal Docs gate", "private", "https://docs.internal.onesa.eu/"],
+  ...products.filter(([,product])=>product!=="portal"&&product!=="internal-documents")
     .map(([repo,product]) => [repo,"Web registration return","page",targets.get(product + "/web/user")]),
 ];
+const registeredNative = products.flatMap(([repo,product,platforms]) =>
+  platforms.filter(platform => platform !== "web").flatMap(platform =>
+    ["user","admin"].map(tier => {
+      const uri=targets.get(product + "/" + platform + "/" + tier);
+      return {repository:"DruHustle/"+repo,surface:"Registered "+platform+" return "+tier,
+        status:null,result:uri && /^[a-z][a-z0-9+.-]*:\/\//.test(uri) ? "STATIC-ONLY" : "NO-GO",
+        evidence:uri ? "Registered native deep link; installed-app return not verified" : "Missing deep link"};
+    })));
+
 async function probe([repo,surface,kind,url]) {
   const row = { repository: "DruHustle/" + repo, surface, status: null, result: "NO-GO", evidence: "NETWORK_ERROR" };
   try {
@@ -47,7 +63,7 @@ async function probe([repo,surface,kind,url]) {
       const html = response.status === 200 ? await response.text() : "";
       accepted = response.status === 200 && html.includes("Onesa Account");
       row.evidence = accepted ? "Account UI served" : "Account UI unavailable";
-    } else if (kind === "register") {
+    } else if (kind === "register" || kind === "authorize") {
       let next = null;
       try { next = new URL(response.headers.get("location"), url); } catch {}
       accepted = [302,303].includes(response.status) && next?.origin === provider &&
@@ -56,6 +72,9 @@ async function probe([repo,surface,kind,url]) {
         next.searchParams.get("code_challenge_method") === "S256" &&
         next.searchParams.has("state") && next.searchParams.has("nonce");
       row.evidence = accepted ? "Auth0 Code + PKCE start; no account created" : "No approved Auth0 PKCE redirect";
+     } else if (kind === "private") {
+      accepted = [302,303,307,308,401,403].includes(response.status);
+      row.evidence = accepted ? "Unauthenticated access gated; authorized Docs not verified" : "Internal Documents did not enforce an expected access gate";
     } else if (kind === "portal") {
       const html = response.status === 200 ? await response.text() : "";
       accepted = response.status === 200 && html.includes("Continue to Onesa Identity") &&
@@ -75,11 +94,11 @@ async function probe([repo,surface,kind,url]) {
 }
 const checks = [];
 for (let i=0;i<cases.length;i+=4) checks.push(...await Promise.all(cases.slice(i,i+4).map(probe)));
-checks.push({repository:"DruHustle/onesa-security",surface:"Signup application",status:null,result:"NOT-IMPLEMENTED",evidence:"Empty repository; no testable application"});
+checks.push(...registeredNative);
 const blocked = checks.filter(x=>["NO-GO","NOT-IMPLEMENTED"].includes(x.result)).length;
 const report = {checked_at:new Date().toISOString(), scope:"PUBLIC HTTP ONLY; NOT FULL SIGNUP ACCEPTANCE",
   overall: blocked ? "NO-GO" : "ENTRY-ONLY (NOT RELEASE GO)", blocked, checks,
-  not_tested:["Verified-email signup","Administrator approval/MFA","Installed iOS and Android returns","Per-product data ACLs"]};
+  not_tested:["Verified-email signup","Password reset delivery","Account deletion downstream acknowledgements","Administrator approval/MFA","Installed iOS and Android returns","Per-product data ACLs"]};
 await writeFile("registration-preflight.json",JSON.stringify(report,null,2)+"\n");
 const lines=["## Onesa registration public HTTP preflight — "+report.overall,"",
   "This **does not** certify account creation, email verification, admin approval or installed-app return.","",
