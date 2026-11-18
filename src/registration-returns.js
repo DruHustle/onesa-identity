@@ -42,11 +42,13 @@ export function registrationReturns(origin, override) {
           throw Error("Invalid registration return destination");
         const url = new URL(raw);
         const expectedNative = platform !== "web" ? new URL(productsWithApps[product][1]) : null;
-        // A custom-scheme link is safe only for the registered app authority.
-        // Reject lookalike hosts that could capture an enrollment return.
-        const native = expectedNative !== null &&
-          url.protocol === expectedNative.protocol && url.host === expectedNative.host;
-        if ((!native && url.protocol !== "https:") || !url.hostname || url.username || url.password ||
+        // Native enrollment must return to the exact registered app landing,
+        // not merely a matching scheme/host or an attacker-controlled HTTPS URL.
+        // This also rejects alternate paths, query payloads and fragments.
+        const native = expectedNative !== null && url.href === expectedNative.href;
+        if ((expectedNative !== null && !native) ||
+            (expectedNative === null && url.protocol !== "https:") ||
+            !url.hostname || url.username || url.password ||
             /(^|\/)callback(?:\/|$)/i.test(url.pathname) ||
             ["code", "state", "access_token", "id_token", "refresh_token"].some(key => url.searchParams.has(key)))
           throw Error("Expected a registered product landing or application link");
