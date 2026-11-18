@@ -428,6 +428,11 @@ export function createApp(store, env, client = authClient(env)) {
                   "<button>Send password reset email</button>",
                 )
               : "<p>Use Forgot password on the sign-in screen to recover your password.</p>") +
+            '<h2>Account closure</h2>' +
+            '<p>Request closure of your Onesa account. This immediately suspends central access and queues credential and product-data cleanup. Completion of downstream erasure is separately verified; applicable legal retention still applies.</p>' +
+            post("/account/delete", session.csrf,
+              '<label>Type DELETE to confirm <input name="confirm" required autocomplete="off" spellcheck="false"></label>' +
+              '<button>Request account closure</button>') +
             post("/logout", session.csrf, "<button>Sign out here</button>"),
         );
     }
@@ -448,6 +453,21 @@ export function createApp(store, env, client = authClient(env)) {
           return page("Product unavailable", '<a href="/account">Return to your account</a>', 400);
         store.requestAccess(session.id, product);
         return redirect("/account");
+      }
+      if (p === "/account/delete") {
+        if (form.getAll("confirm").length !== 1 || form.get("confirm") !== "DELETE")
+          return page("Confirmation required", "Enter DELETE exactly to request account closure.", 400);
+        if (!session.mfa_at || Date.now() - session.mfa_at > 300000 ||
+            session.mfa_at > Date.now())
+          return page("Verify your identity",
+            '<p>Recent multi-factor verification is required before closing your account.</p>' +
+            '<a href="/verify-factor">Verify a second factor</a>', 403);
+        store.requestDeletion(session.id);
+        const result = page("Account closure requested",
+          "<p>Your Onesa account access has been suspended. Your request is recorded for credential-provider and product-data cleanup. Some records may be retained where required by law. The request is not yet confirmation of complete erasure.</p>");
+        result.headers.append("set-cookie", cookie("session", "", 0));
+        result.headers.append("set-cookie", cookie("registration", "", 0));
+        return result;
       }
       if (p === "/account/recovery" && env.connection) {
         const recoveryNow = Date.now();
