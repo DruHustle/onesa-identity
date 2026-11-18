@@ -5,6 +5,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 export const products = {
   identity: ["admin"],
+  security: ["viewer", "analyst", "admin", "owner"],
   portal: ["owner", "administrator", "editor", "business", "hr", "viewer"],
   "internal-documents": ["viewer", "editor", "admin"],
   "engineering-documents": ["viewer", "editor", "admin"],
@@ -29,6 +30,7 @@ export const products = {
 export const accountProducts = new Map([
   ["portal", { name: "Company Portal", role: "viewer" }],
   ["internal-documents", { name: "Internal Documents", role: "viewer" }],
+  ["security", { name: "Onesa Security", role: "viewer" }],
   ["factory", { name: "Smart Factory", role: "user" }],
   ["logistics", { name: "Smart Logistics", role: "user" }],
   ["farmer", { name: "Smart Farmer", role: "user" }],

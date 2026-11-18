@@ -220,7 +220,9 @@ test("both registration types return to each registered product and platform wit
   const registry = registrationReturns("https://auth.onesa.eu");
   // Production Account and the Auth0 provider may use different origins.
   assert.deepEqual([...registrationReturns("https://account.onesa.eu")], [...registry]);
-  assert.equal(registry.size, 52);
+  assert.equal(registry.size, 54);
+  assert.equal(registry.get("security/web/user"), "https://security.onesa.eu/?registration=complete");
+  assert.equal(registry.get("security/web/admin"), "https://security.onesa.eu/?registration=complete");
   assert.equal(registry.get("portal/web/admin"), "https://portal.onesa.eu/account/registered?audience=admin");
   assert.equal(registry.get("portal/web/user"), "https://portal.onesa.eu/account/registered");
   assert.equal(registry.get("internal-documents/web/user"), "https://docs.internal.onesa.eu/registration/return");
@@ -343,7 +345,7 @@ test("one verified signup and independent review give product-scoped user or adm
     assert.equal((await decide("ai", "other-product")).status, 403);
     for (const [product, entry] of accountProducts) {
       const response = await decide(product);
-      if (product === "internal-documents" || (product === "portal" && tier === "user")) {
+      if (product === "internal-documents" || product === "security" || (product === "portal" && tier === "user")) {
         assert.equal(response.status, 403);
       } else {
         assert.equal(response.status, 200, product);
@@ -1553,4 +1555,31 @@ test("idempotent rollback replay also invalidates restored sessions, invites and
     source.db.close();
     restored.db.close();
   }
+});
+
+test("Security requires a dedicated audience, explicit Identity grant and separate organization membership", async t => {
+  const resource = new Map([["https://security-api.onesa.eu",
+    { product: "security", clients: ["security-web"] }]]);
+  const { call, store, admin } = await fixture(t, { resources: resource });
+  const subject = "oidc|security-member";
+  const member = store.register(env.issuer, subject, "security-member@onesa.test", "", "user");
+  store.change(admin.id, member.id, member.revision, { kind: "status", status: "active" });
+  const decision = (client = "security-web") => call("/internal/decision", "POST",
+    JSON.stringify({ subject, audience: "https://security-api.onesa.eu", client }),
+    { authorization: "Bearer " + env.policyKey, "content-type": "application/json" });
+  assert.equal((await decision()).status, 403, "shared registration does not grant Security access");
+  store.requestAccess(member.id, "security");
+  assert.deepEqual({ ...store.one(
+    "SELECT role,status FROM grants WHERE id=? AND product='security'", member.id) },
+    { role: "viewer", status: "pending" });
+  assert.equal((await decision()).status, 403, "unapproved viewer requests do not grant access");
+  assert.equal((await decision("unregistered-client")).status, 403);
+  store.change(admin.id, member.id, store.lookup(env.issuer, subject).revision,
+    { kind: "review", product: "security", role: "viewer", status: "active" });
+  const accepted = await decision();
+  assert.equal(accepted.status, 200);
+  assert.deepEqual((await accepted.json()).roles, ["viewer"]);
+  store.change(admin.id, member.id, store.lookup(env.issuer, subject).revision,
+    { kind: "grant", product: "security", role: "viewer", status: "revoked" });
+  assert.equal((await decision()).status, 403);
 });

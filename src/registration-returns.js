@@ -16,6 +16,9 @@ const production = Object.fromEntries(Object.entries(productsWithApps).map(([pro
 production.portal = { web: { user: "https://portal.onesa.eu/account/registered",
   admin: "https://portal.onesa.eu/account/registered?audience=admin" } };
 production["internal-documents"] = { web: "https://docs.internal.onesa.eu/registration/return" };
+// Security is web-only and requires an explicit Identity grant and a separate
+// organization membership; it does not inherit shared user/admin access.
+production.security = { web: "https://security.onesa.eu/?registration=complete" };
 
 // Auth0 remains the issuer on auth.onesa.eu. A DNS-only provider domain
 // must not be intercepted by the application; use the separate Account origin.
