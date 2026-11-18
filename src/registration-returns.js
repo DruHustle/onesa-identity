@@ -41,7 +41,11 @@ export function registrationReturns(origin, override) {
         if (!["user", "admin"].includes(tier) || typeof raw !== "string" || raw.trim() !== raw)
           throw Error("Invalid registration return destination");
         const url = new URL(raw);
-        const native = platform !== "web" && url.protocol === new URL(productsWithApps[product][1]).protocol;
+        const expectedNative = platform !== "web" ? new URL(productsWithApps[product][1]) : null;
+        // A custom-scheme link is safe only for the registered app authority.
+        // Reject lookalike hosts that could capture an enrollment return.
+        const native = expectedNative !== null &&
+          url.protocol === expectedNative.protocol && url.host === expectedNative.host;
         if ((!native && url.protocol !== "https:") || !url.hostname || url.username || url.password ||
             /(^|\/)callback(?:\/|$)/i.test(url.pathname) ||
             ["code", "state", "access_token", "id_token", "refresh_token"].some(key => url.searchParams.has(key)))
