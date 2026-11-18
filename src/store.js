@@ -120,6 +120,16 @@ export function openStore(path, { existingOnly = false } = {}) {
     CREATE INDEX IF NOT EXISTS registration_resume_browser ON registration_resumes(hash);
     CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY, id TEXT NOT NULL REFERENCES accounts, csrf TEXT NOT NULL, expires INTEGER NOT NULL, mfa_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS recovery_limit(id TEXT PRIMARY KEY REFERENCES accounts, next INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS account_deletion_requests(
+      id TEXT PRIMARY KEY REFERENCES accounts, requested_at INTEGER NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('requested','reconciled'))
+    );
+    CREATE TABLE IF NOT EXISTS account_deletion_outbox(
+      id TEXT NOT NULL REFERENCES accounts, target TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','completed','failed')),
+      receipt TEXT, updated_at INTEGER NOT NULL,
+      PRIMARY KEY(id,target)
+    );
     CREATE TABLE IF NOT EXISTS imports(snapshot TEXT PRIMARY KEY, digest TEXT NOT NULL, watermark INTEGER NOT NULL); `);
   const one = (q, ...a) => db.prepare(q).get(...a);
   const all = (q, ...a) => db.prepare(q).all(...a);
@@ -286,6 +296,9 @@ export function openStore(path, { existingOnly = false } = {}) {
       const contact = email.trim().toLowerCase();
       const linked = lookup(issuer, sub);
       if (linked) {
+        // A disabled account must not mutate its verified contact or reopen
+        // registrations just because the upstream provider signed it in.
+        check(["active", "pending"].includes(linked.status), "Account unavailable");
         if (linked.email !== contact) {
           // Only the same verified issuer/subject may refresh its contact
           // address. An email collision never transfers another account.
@@ -392,6 +405,37 @@ export function openStore(path, { existingOnly = false } = {}) {
       }
     });
   }
+  // A requested closure immediately removes central access, while each
+  // independently owned product and the credential provider must acknowledge
+  // its own cleanup before anyone can call the process complete.
+  const deletionTargets = [
+    "auth0", "portal", "internal-documents", "pasofi", "security",
+    "farmer", "logistics", "factory", "mobile", "ai", "drone", "robot",
+  ];
+  function requestDeletion(id) {
+    return atomic(() => {
+      const existing = one("SELECT requested_at,status FROM account_deletion_requests WHERE id=?", id);
+      if (existing) return { requestedAt: existing.requested_at, status: existing.status, repeated: true };
+      const account = one("SELECT status FROM accounts WHERE id=?", id);
+      check(account && ["active", "pending"].includes(account.status), "Account unavailable");
+      // Losing the only governance administrator would prevent independent
+      // reviews and reconciliation of the deletion request.
+      check(activeGrant(id, "identity")?.role !== "admin", "Transfer Identity administration before requesting closure");
+      const now = Date.now();
+      run("INSERT INTO account_deletion_requests VALUES(?,?,'requested')", id, now);
+      for (const target of deletionTargets)
+        run("INSERT INTO account_deletion_outbox VALUES(?,?,'pending',NULL,?)", id, target, now);
+      for (const [tier, status] of registrations(db, id)) {
+        if (status === "active" || status === "pending")
+          audit(id, "shared-registration", id, { tier, status: "revoked" });
+      }
+      run("UPDATE grants SET status='revoked' WHERE id=? AND status IN ('active','pending')", id);
+      run("UPDATE accounts SET status='suspended',revision=revision+1 WHERE id=?", id);
+      run("DELETE FROM sessions WHERE id=?", id);
+      audit(id, "request-account-deletion", id, { downstream: deletionTargets.length });
+      return { requestedAt: now, status: "requested", repeated: false };
+    });
+  }
   function change(actor, id, revision, operation) {
     return atomic(() => {
       const current = one("SELECT * FROM accounts WHERE id=?", id);
@@ -406,6 +450,9 @@ export function openStore(path, { existingOnly = false } = {}) {
           ),
           "Invalid status",
         );
+        if (operation.status === "active")
+          check(!one("SELECT 1 FROM account_deletion_requests WHERE id=?", id),
+            "Account closure pending; reconcile before reactivation");
         if (actor === id)
           check(
             operation.status === "active",
@@ -474,6 +521,7 @@ export function openStore(path, { existingOnly = false } = {}) {
     register,
     requestAccess,
     requestRegistration,
+    requestDeletion,
     invite,
     change,
   };
