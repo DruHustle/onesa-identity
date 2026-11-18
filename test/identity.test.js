@@ -252,7 +252,10 @@ test("both registration types return to each registered product and platform wit
   assert.equal(registrationReturns("https://staging.onesa.test", custom).get(returnKey("farmer", "web", "admin")), "https://pilot.onesa.test/auth/registration/complete");
   for (const [platform, invalid] of [["web", "http://pilot.onesa.test/"], ["ios", "onesamobile://auth/registered"],
       ["ios", "smartfarmer://onesa/callback"], ["ios", "smartfarmer://attacker/registered"],
-      ["android", "smartfarmer://onesa.evil.test/registered"], ["web", "https://pilot.onesa.test/entry?code=fixture"]])
+      ["android", "smartfarmer://onesa.evil.test/registered"],
+      ["ios", "smartfarmer://onesa/other-screen"], ["android", "smartfarmer://onesa/registered?next=admin"],
+      ["ios", "smartfarmer://onesa/registered#override"], ["ios", "https://attacker.onesa.test/registered"],
+      ["web", "https://pilot.onesa.test/entry?code=fixture"]])
     assert.throws(() => registrationReturns(env.origin, JSON.stringify({ farmer: { [platform]: invalid } })));
 });
 
