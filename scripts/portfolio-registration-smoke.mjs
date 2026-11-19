@@ -84,6 +84,11 @@ async function probe([repo,surface,kind,url]) {
       accepted = response.status >= 200 && response.status < 400;
       row.evidence = accepted ? "HTTP entry only; browser/signup not verified" : "Web return unavailable";
     }
+    if (response.status >= 500) {
+      const edge = response.headers.get("server")?.slice(0, 40) || "unspecified";
+      const ray = response.headers.get("cf-ray")?.slice(0, 60) || "none";
+      row.evidence += "; upstream error; edge=" + edge + "; cf-ray=" + ray;
+    }
     row.result = accepted ? (kind === "page" ? "ENTRY-ONLY" : "REACHABLE") : "NO-GO";
   } catch (error) {
     const cause = error?.cause?.code;
