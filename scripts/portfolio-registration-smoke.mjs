@@ -74,7 +74,7 @@ async function probe([repo,surface,kind,url]) {
       row.evidence = accepted ? "Auth0 Code + PKCE start; no account created" : "No approved Auth0 PKCE redirect";
      } else if (kind === "private") {
       accepted = [302,303,307,308,401,403].includes(response.status);
-      row.evidence = accepted ? "Unauthenticated access gated; authorized Docs not verified" : "Internal Documents did not enforce an expected access gate";
+      row.evidence = accepted ? "Unauthenticated access gated; authorized access not verified" : "Internal Documents did not enforce an expected access gate";
     } else if (kind === "portal") {
       const html = response.status === 200 ? await response.text() : "";
       accepted = response.status === 200 && html.includes("Continue to Onesa Identity") &&
@@ -84,7 +84,7 @@ async function probe([repo,surface,kind,url]) {
       accepted = response.status >= 200 && response.status < 400;
       row.evidence = accepted ? "HTTP entry only; browser/signup not verified" : "Web return unavailable";
     }
-    row.result = accepted ? (kind === "page" ? "ENTRY-ONLY" : "REACHABLE") : "NO-GO";
+    if (response.status >= 500) {\n      const server = response.headers.get("server")?.slice(0, 60) ?? "unknown";\n      const ray = response.headers.get("cf-ray")?.slice(0, 80) ?? "none";\n      row.evidence += `; upstream error; server=${server}; ray=${ray}`;\n    }\n    row.result = accepted ? (kind === "page" ? "ENTRY-ONLY" : "REACHABLE") : "NO-GO";
   } catch (error) {
     const cause = error?.cause?.code;
     row.evidence = error?.name === "TimeoutError" ? "TIMEOUT" :
