@@ -1,4 +1,25 @@
 // Bind immediately before post-login.cjs so the policy Action observes the completed challenge.
+/**
+ * Cloudflare Access uses a dedicated Auth0 client. Only that exact, explicitly
+ * registered client may request an infrastructure assertion; unrelated clients
+ * retain their normal resource audience and never receive the claim.
+ */
+function infrastructureAudience(event) {
+  const secrets = event.secrets || {};
+  const id = secrets.INFRASTRUCTURE_SSO_CLIENT_ID;
+  if (!id || event.client?.client_id !== id)
+    return { infrastructure: false, audience: event.resource_server?.identifier || "" };
+  if (typeof id !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(id))
+    throw Error("Invalid infrastructure client binding");
+  const value = secrets.INFRASTRUCTURE_SSO_AUDIENCE;
+  const url = new URL(value);
+  if (url.protocol !== "https:" || value !== url.origin ||
+      url.username || url.password || url.search || url.hash ||
+      (event.resource_server?.identifier && event.resource_server.identifier !== value))
+    throw Error("Invalid infrastructure audience");
+  return { infrastructure: true, audience: value };
+}
+
 const mfaAcr = "http://schemas.openid.net/pape/policies/2007/06/multi-factor";
 const operationAcr = "urn:onesa:authentication:operation-mfa";
 const enrollmentTypes = ["otp", "webauthn-platform", "webauthn-roaming", "push-notification", "phone"];
@@ -11,7 +32,8 @@ function values(input) {
 
 async function needsSharedMfa(event) {
   const { POLICY_URL, POLICY_ORIGIN, POLICY_KEY } = event.secrets || {};
-  if (!event.resource_server?.identifier || !event.user?.email_verified ||
+  const audience = infrastructureAudience(event);
+  if (!audience.audience || !event.user?.email_verified ||
       !POLICY_URL || !POLICY_ORIGIN || !POLICY_KEY) return false;
   const now = Date.now();
   if ((event.authentication?.methods || []).some(method => {
@@ -25,10 +47,22 @@ async function needsSharedMfa(event) {
   const response = await fetch(POLICY_URL, {
     method: "POST", redirect: "error", signal: AbortSignal.timeout(3500),
     headers: { authorization: "Bearer " + POLICY_KEY, "content-type": "application/json" },
-    body: JSON.stringify({ subject: event.user.user_id, audience: event.resource_server.identifier, client: event.client.client_id }),
+    body: JSON.stringify({ subject: event.user.user_id, audience: audience.audience, client: event.client.client_id }),
   });
-  if (!response.ok) return false; // The issuance Action makes the authoritative decision after MFA.
-  return (await response.json()).require_mfa === true;
+  if (!response.ok) {
+    if (audience.infrastructure) throw Error("Infrastructure authorization refused");
+    return false; // The issuance Action makes the authoritative decision after MFA.
+  }
+  const decision = await response.json();
+  if (audience.infrastructure) {
+    // An explicitly granted Portal owner/administrator is the only principal
+    // eligible for infrastructure MFA; editor, viewer and pending are denied.
+    if (decision.product !== "portal" || !Array.isArray(decision.roles) ||
+        decision.roles.length !== 1 || !["administrator", "owner"].includes(decision.roles[0]))
+      throw Error("Infrastructure administrator grant required");
+    return true; // An explicit admin grant still requires a fresh second factor.
+  }
+  return decision.require_mfa === true;
 }
 
 exports.onExecutePostLogin = async (event, api) => {
