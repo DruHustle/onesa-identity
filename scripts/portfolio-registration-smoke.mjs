@@ -84,7 +84,12 @@ async function probe([repo,surface,kind,url]) {
       accepted = response.status >= 200 && response.status < 400;
       row.evidence = accepted ? "HTTP entry only; browser/signup not verified" : "Web return unavailable";
     }
-    if (response.status >= 500) {\n      const server = response.headers.get("server")?.slice(0, 60) ?? "unknown";\n      const ray = response.headers.get("cf-ray")?.slice(0, 80) ?? "none";\n      row.evidence += `; upstream error; server=${server}; ray=${ray}`;\n    }\n    row.result = accepted ? (kind === "page" ? "ENTRY-ONLY" : "REACHABLE") : "NO-GO";
+    if (response.status >= 500) {
+      const server = response.headers.get("server")?.slice(0, 60) ?? "unknown";
+      const ray = response.headers.get("cf-ray")?.slice(0, 80) ?? "none";
+      row.evidence += `; upstream error; server=${server}; ray=${ray}`;
+    }
+    row.result = accepted ? (kind === "page" ? "ENTRY-ONLY" : "REACHABLE") : "NO-GO";
   } catch (error) {
     const cause = error?.cause?.code;
     row.evidence = error?.name === "TimeoutError" ? "TIMEOUT" :
@@ -99,13 +104,16 @@ const blocked = checks.filter(x=>["NO-GO","NOT-IMPLEMENTED"].includes(x.result))
 const report = {checked_at:new Date().toISOString(), scope:"PUBLIC HTTP ONLY; NOT FULL SIGNUP ACCEPTANCE",
   overall: blocked ? "NO-GO" : "ENTRY-ONLY (NOT RELEASE GO)", blocked, checks,
   not_tested:["Verified-email signup","Password reset delivery","Account deletion downstream acknowledgements","Administrator approval/MFA","Installed iOS and Android returns","Per-product data ACLs"]};
-await writeFile("registration-preflight.json",JSON.stringify(report,null,2)+"\n");
+await writeFile("registration-preflight.json",JSON.stringify(report,null,2)+"
+");
 const lines=["## Onesa registration public HTTP preflight — "+report.overall,"",
   "This **does not** certify account creation, email verification, admin approval or installed-app return.","",
   "| Repository | Surface | HTTP | Result | Evidence |","|---|---|---:|---|---|",
   ...checks.map(r=>"| "+r.repository+" | "+r.surface+" | "+(r.status??"—")+" | **"+r.result+"** | "+r.evidence+" |"),""];
-const summary=lines.join("\n");
+const summary=lines.join("
+");
 console.log(summary);
-if(process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY,summary+"\n");
+if(process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY,summary+"
+");
 if(blocked) console.log("::warning::Portfolio registration NO-GO: "+blocked+" unavailable or unimplemented checks");
 if(process.env.STRICT_LIVE_SMOKE==="1"&&blocked)process.exitCode=1;
