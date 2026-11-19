@@ -61,11 +61,26 @@ export function authorizeRedirect(location) {
     "Onesa Account did not start a valid Auth0 Code + PKCE flow");
 }
 
-const enrollments = [
-  ["user", "farmer", "web"],
+// Check every product and platform, not just a single Farmer and PasoFi sample.
+// Enrollment is a read-only entry preflight: it must never follow the provider
+// redirect, complete registration, confer a role or create a product session.
+// Web verifies both user and administrator request types. Native verifies the
+// platform-specific browser return route for every product as a normal user.
+const nativeProducts = Object.freeze([
+  "ai", "drone", "robot", "farmer", "factory", "logistics", "mobile", "pasofi",
+]);
+export const enrollments = Object.freeze([
+  ...nativeProducts.flatMap(product => [
+    ["user", product, "web"],
+    ["admin", product, "web"],
+    ["user", product, "ios"],
+    ["user", product, "android"],
+  ]),
+  ["user", "portal", "web"],
   ["admin", "portal", "web"],
-  ["user", "pasofi", "ios"],
-];
+  ["user", "internal-documents", "web"],
+  ["admin", "security", "web"],
+]);
 
 async function fetchChecked(url, options = {}) {
   return fetch(url, {redirect: "manual", signal: AbortSignal.timeout(10000), ...options});
