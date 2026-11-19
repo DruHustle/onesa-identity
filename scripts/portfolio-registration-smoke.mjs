@@ -26,7 +26,7 @@ const cases = [
   ["onesa-documents", "Public Docs", "page", "https://docs.onesa.eu/"],
   ["onesa-documents", "Internal Docs gate", "private", "https://docs.internal.onesa.eu/"],
   ...products.filter(([,product])=>product!=="portal"&&product!=="internal-documents")
-    .map(([repo,product]) => [repo,"Web registration return","page",targets.get(product + "/web/user")]),
+    .map(([repo,product]) => [repo,"Web registration return",product === "security" ? "private" : "page",targets.get(product + "/web/user")]),
 ];
 const registeredNative = products.flatMap(([repo,product,platforms]) =>
   platforms.filter(platform => platform !== "web").flatMap(platform =>
