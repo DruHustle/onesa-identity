@@ -219,8 +219,11 @@ export function createApp(store, env, client = authClient(env)) {
         product,
         roles: [role],
         ...(!explicit && product === "portal" && role === "administrator" ? { portal_staff_registration: true } : {}),
-        ...((!explicit && (role === "admin" || role === "administrator")) ||
-          (configurableAdminRoles.has(product) && role === "admin") ? { require_mfa: true } : {}),
+        // Every privileged role requires recent MFA, including explicit grants.
+        // An explicit product grant must never downgrade the authentication
+        // requirements of the identical role inherited through registration.
+        ...(["admin", "administrator", "owner"].includes(role)
+          ? { require_mfa: true } : {}),
       });
     }
     if (p === "/account/registration/resume" && method === "GET") {

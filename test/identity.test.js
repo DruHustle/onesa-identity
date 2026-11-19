@@ -1587,3 +1587,52 @@ test("Security requires a dedicated audience, explicit Identity grant and separa
     { kind: "grant", product: "security", role: "viewer", status: "revoked" });
   assert.equal((await decision()).status, 403);
 });
+
+
+test("explicit Portal and product administrator grants always require MFA", async t => {
+  const resources = new Map([
+    ["https://api.portal.onesa.test", { product: "portal", clients: ["infrastructure-sso"] }],
+    ["https://api.ai.onesa.test", { product: "ai", clients: ["ai-client"] }],
+    ["https://api.security.onesa.test", { product: "security", clients: ["security-client"] }],
+    ["https://api.factory.onesa.test", { product: "factory", clients: ["factory-client"], sharedAdminRole: "admin" }],
+  ]);
+  const { call, store, admin } = await fixture(t, { resources });
+  const subject = "oidc|explicit-admin-mfa";
+  const account = store.register(env.issuer, subject, "explicit-admin-mfa@onesa.test");
+  const revision = () => store.lookup(env.issuer, subject).revision;
+  store.change("bootstrap", account.id, revision(), { kind: "status", status: "active" });
+
+  function grant(product, role, status = "active") {
+    store.change(admin.id, account.id, revision(), { kind: "grant", product, role, status });
+  }
+  async function decide(product) {
+    const [audience, resource] = [...resources].find(([, r]) => r.product === product);
+    return call("/internal/decision", "POST",
+      JSON.stringify({ subject, audience, client: resource.clients[0] }),
+      { authorization: "Bearer " + env.policyKey });
+  }
+  for (const [product, role] of [
+    ["portal", "administrator"],
+    ["portal", "owner"],
+    ["ai", "admin"],
+    ["security", "owner"],
+    ["factory", "admin"],
+  ]) {
+    grant(product, role);
+    const response = await decide(product);
+    assert.equal(response.status, 200, product + "/" + role);
+    const decision = await response.json();
+    assert.deepEqual(decision.roles, [role]);
+    assert.equal(decision.require_mfa, true, product + "/" + role + " must require MFA");
+  }
+  grant("portal", "viewer");
+  const viewer = await decide("portal");
+  assert.equal(viewer.status, 200);
+  assert.equal((await viewer.json()).require_mfa, undefined, "non-admin viewer must not be promoted");
+  grant("portal", "administrator");
+  grant("portal", "administrator", "revoked");
+  assert.equal((await decide("portal")).status, 403, "revoked Portal grant must fail closed");
+  grant("portal", "administrator");
+  store.change("bootstrap", account.id, revision(), { kind: "status", status: "suspended" });
+  assert.equal((await decide("portal")).status, 403, "suspended administrator must fail closed");
+});
