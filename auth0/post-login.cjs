@@ -94,12 +94,6 @@ exports.onExecutePostLogin = async (event, api) => {
   if ((decision.require_mfa === true || infrastructure) &&
       (!mfaTime || mfaTime > Math.floor(Date.now() / 1000) ||
        Math.floor(Date.now() / 1000) - mfaTime > 300)) return deny();
-  // Cloudflare evaluates this signed ID-token claim; email or a normal Portal
-  // session is never sufficient. No implicit grant or self-service decision.
-  if (infrastructure) {
-    if (!api.idToken?.setCustomClaim) return deny();
-    api.idToken.setCustomClaim(ns + "infrastructure_admin", "approved");
-  }
   const transaction = event.transaction || {};
   const requested = Array.isArray(transaction.acr_values)
     ? transaction.acr_values
@@ -120,6 +114,12 @@ exports.onExecutePostLogin = async (event, api) => {
   }
   if (!decision.user_id || !decision.product || !Array.isArray(decision.roles))
     return deny();
+  // Cloudflare evaluates this signed ID-token claim; email or a normal Portal
+  // session is never sufficient. No implicit grant or self-service decision.
+  if (infrastructure) {
+    if (!api.idToken?.setCustomClaim) return deny();
+    api.idToken.setCustomClaim(ns + "infrastructure_admin", "approved");
+  }
   if (mfaTime) api.accessToken.setCustomClaim(ns + "mfa_time", mfaTime);
   if (decision.portal_staff_registration === true && decision.product === "portal" &&
       decision.require_mfa === true && decision.roles.length === 1 && decision.roles[0] === "administrator")
