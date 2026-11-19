@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {accountRoute, authorizeRedirect, withAccountService, verifyAccount} from
+import {accountRoute, authorizeRedirect, withAccountService, verifyAccount, enrollments} from
   "../scripts/activate-account-tunnel.mjs";
 
 const input = () => ({ingress: [
@@ -72,11 +72,38 @@ test("preflight checks commissioned store, anonymous policy denial and product r
     throw Error("Unrecognized request");
   };
   await verifyAccount(origin,fake);
-  assert.equal(seen.length,6);
-  assert.equal(seen.filter(x=>x[0]==="/register").length,3);
-  assert.ok(seen.some(x=>x[1].includes("audience=admin")));
-  assert.ok(seen.some(x=>x[1].includes("platform=ios")));
+  assert.equal(enrollments.length,36);
+  assert.equal(seen.length,enrollments.length+3);
+  const entries=seen.filter(x=>x[0]==="/register").map(x=>new URLSearchParams(x[1]));
+  assert.equal(entries.length,enrollments.length);
+  assert.deepEqual(entries.map(q=>[q.get("audience"),q.get("product"),q.get("platform")]), enrollments);
+  const products=["ai","drone","robot","farmer","factory","logistics","mobile","pasofi"];
+  for(const product of products){
+    for(const platform of ["web","ios","android"]){
+      assert.ok(entries.some(q=>q.get("product")===product&&q.get("platform")===platform&&q.get("audience")==="user"));
+    }
+    assert.ok(entries.some(q=>q.get("product")===product&&q.get("platform")==="web"&&q.get("audience")==="admin"));
+  }
+  assert.ok(entries.some(q=>q.get("product")==="portal"&&q.get("audience")==="admin"));
+  assert.ok(entries.some(q=>q.get("product")==="internal-documents"));
+  assert.ok(entries.some(q=>q.get("product")==="security"));
   assert.ok(seen.some(x=>x[0]==="/internal/decision"&&x[2]==="POST"));
+});
+
+test("preflight rejects one broken registration route even when the others work", async () => {
+  const origin="http://127.0.0.1:18600";
+  const fake=async url=>{
+    const u=new URL(url);
+    if(u.pathname==="/readyz")return Response.json({service:"onesa-identity",ready:true});
+    if(u.pathname==="/account")return new Response("Onesa Account");
+    if(u.pathname==="/internal/decision")return new Response(null,{status:401});
+    if(u.pathname==="/register")return u.searchParams.get("product")==="robot"
+      && u.searchParams.get("platform")==="android"
+      ? new Response("Native route missing",{status:404})
+      : new Response(null,{status:303,headers:{location:redirect()}});
+    throw Error("Unrecognized request");
+  };
+  await assert.rejects(()=>verifyAccount(origin,fake),/Registration entry failed for robot\/android\/user/);
 });
 
 test("preflight refuses a different service, missing Account UI, or unprotected policy API", async () => {
