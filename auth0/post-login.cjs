@@ -1,4 +1,25 @@
 // Install in a dedicated Onesa Auth0 tenant, including refresh-token exchanges.
+/**
+ * Cloudflare Access uses a dedicated Auth0 client. Only that exact, explicitly
+ * registered client may request an infrastructure assertion; unrelated clients
+ * retain their normal resource audience and never receive the claim.
+ */
+function infrastructureAudience(event) {
+  const secrets = event.secrets || {};
+  const id = secrets.INFRASTRUCTURE_SSO_CLIENT_ID;
+  if (!id || event.client?.client_id !== id)
+    return { infrastructure: false, audience: event.resource_server?.identifier || "" };
+  if (typeof id !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(id))
+    throw Error("Invalid infrastructure client binding");
+  const value = secrets.INFRASTRUCTURE_SSO_AUDIENCE;
+  const url = new URL(value);
+  if (url.protocol !== "https:" || value !== url.origin ||
+      url.username || url.password || url.search || url.hash ||
+      (event.resource_server?.identifier && event.resource_server.identifier !== value))
+    throw Error("Invalid infrastructure audience");
+  return { infrastructure: true, audience: value };
+}
+
 // POLICY_URL and POLICY_KEY belong in the Action secret store.
 exports.onExecutePostLogin = async (event, api) => {
   const deny = () =>
@@ -12,6 +33,7 @@ exports.onExecutePostLogin = async (event, api) => {
   )
     return deny();
   let decision;
+  let infrastructure = false;
   try {
     const url = new URL(POLICY_URL);
     const origin = new URL(POLICY_ORIGIN);
@@ -33,6 +55,8 @@ exports.onExecutePostLogin = async (event, api) => {
       url.password
     )
       return deny();
+    const audience = infrastructureAudience(event);
+    infrastructure = audience.infrastructure;
     const result = await fetch(url, {
       method: "POST",
       redirect: "error",
@@ -43,7 +67,7 @@ exports.onExecutePostLogin = async (event, api) => {
       },
       body: JSON.stringify({
         subject: event.user.user_id,
-        audience: event.resource_server?.identifier || "",
+        audience: audience.audience,
         client: event.client.client_id,
       }),
     });
@@ -53,6 +77,13 @@ exports.onExecutePostLogin = async (event, api) => {
     return deny();
   }
   const ns = "https://onesa.eu/claims/";
+  if (infrastructure && (
+    event.transaction?.protocol !== "oidc-basic-profile" ||
+    decision?.product !== "portal" ||
+    !Array.isArray(decision.roles) ||
+    decision.roles.length !== 1 ||
+    !["administrator", "owner"].includes(decision.roles[0])
+  )) return deny();
   // Token issuance time is not evidence of a fresh factor.
   const observed = (event.authentication?.methods || [])
     .filter((m) => m.name === "mfa")
@@ -60,7 +91,15 @@ exports.onExecutePostLogin = async (event, api) => {
     .filter(Number.isFinite);
   const latest = observed.length ? Math.max(...observed) : 0;
   const mfaTime = latest > 0 && latest <= Date.now() ? Math.floor(latest / 1000) : 0;
-  if (decision.require_mfa === true && (!mfaTime || Math.floor(Date.now() / 1000) - mfaTime > 300)) return deny();
+  if ((decision.require_mfa === true || infrastructure) &&
+      (!mfaTime || mfaTime > Math.floor(Date.now() / 1000) ||
+       Math.floor(Date.now() / 1000) - mfaTime > 300)) return deny();
+  // Cloudflare evaluates this signed ID-token claim; email or a normal Portal
+  // session is never sufficient. No implicit grant or self-service decision.
+  if (infrastructure) {
+    if (!api.idToken?.setCustomClaim) return deny();
+    api.idToken.setCustomClaim(ns + "infrastructure_admin", "approved");
+  }
   const transaction = event.transaction || {};
   const requested = Array.isArray(transaction.acr_values)
     ? transaction.acr_values
