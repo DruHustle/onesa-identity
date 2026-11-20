@@ -98,7 +98,7 @@ test("Identity administrators must transfer governance before requesting closure
   const f = await fixture(t);
   const current = f.store.lookup(issuer, "oidc|closure-member");
   f.store.change("bootstrap", f.account.id, current.revision, {
-    kind: "grant", product: "identity", role: "admin", status: "active",
+    kind: "grant", product: "identity", role: "administrator", status: "active",
   });
   const attempted = await f.request();
   assert.equal(attempted.status, 409);

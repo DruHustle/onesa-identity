@@ -69,6 +69,29 @@ test("audit chain upgrades legacy rows, blocks mutation and detects tampering", 
   }
 });
 
+test("stored admin grants migrate to administrator and the rename is audited", () => {
+  const directory = mkdtempSync(join(tmpdir(), "onesa-role-rename-"));
+  const file = join(directory, "identity.sqlite");
+  const first = openStore(file);
+  const account = first.register(env.issuer, "oidc|legacy-admin", "legacy-admin@onesa.test");
+  first.run("UPDATE accounts SET status='active' WHERE id=?", account.id);
+  first.run("INSERT INTO grants VALUES(?,?,?,?)", account.id, "identity", "admin", "active");
+  first.db.close();
+  const migrated = openStore(file);
+  try {
+    assert.equal(migrated.activeGrant(account.id, "identity").role, "administrator");
+    const event = migrated.one("SELECT actor,action,detail FROM audit WHERE target=? ORDER BY seq DESC LIMIT 1", account.id);
+    assert.equal(event.actor, "system:administrator-role-migration");
+    assert.equal(event.action, "administrator-role-renamed");
+    assert.deepEqual(JSON.parse(event.detail), {
+      product: "identity", from: "admin", to: "administrator", status: "active",
+    });
+  } finally {
+    migrated.db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 const env = {
   origin: "https://identity-admin.onesa.test",
   issuer: "https://auth.onesa.test/",
@@ -192,7 +215,7 @@ async function fixture(t, overrides = {}) {
   store.change("bootstrap", admin.id, 2, {
     kind: "grant",
     product: "identity",
-    role: "admin",
+    role: "administrator",
     status: "active",
   });
   return { store, call, login, admin, setRedeem: (next) => { redeem = next ?? defaultRedeem; } };
@@ -355,7 +378,7 @@ test("one verified signup and independent review give product-scoped user or adm
         assert.equal(response.status, 200, product);
         const decision = await response.json();
         assert.equal(decision.user_id, account.id);
-        assert.deepEqual(decision.roles, [tier === "admin" ? (product === "portal" ? "administrator" : "admin") : entry.role]);
+        assert.deepEqual(decision.roles, [tier === "admin" ? "administrator" : entry.role]);
         assert.equal(Boolean(decision.require_mfa), tier === "admin");
         assert.equal(Boolean(decision.portal_staff_registration), tier === "admin" && product === "portal");
       }
@@ -542,6 +565,121 @@ test("Identity UI changes grant, revocation and suspension at next issuance; res
   assert.equal((await mutate(7, "status", "suspended", "")).status, 303);
   assert.equal((await decision(env.clientId, "")).status, 403);
 });
+
+test("product administrators manage only their product list and removals preserve ordinary access", async t => {
+  const resources = new Map([
+    ["https://api.factory.onesa.test", {
+      product: "factory",
+      clients: ["factory-web"],
+      sharedAdminRole: "administrator",
+    }],
+    ["https://api.ai.onesa.test", { product: "ai", clients: ["ai-web"] }],
+  ]);
+  const { call, store, login, admin } = await fixture(t, { resources });
+  const factoryAdmin = store.register(env.issuer, "oidc|factory-admin", "factory-admin@onesa.test");
+  store.change(admin.id, factoryAdmin.id, factoryAdmin.revision, { kind: "status", status: "active" });
+  store.change(admin.id, factoryAdmin.id, store.lookup(env.issuer, "oidc|factory-admin").revision,
+    { kind: "grant", product: "factory", role: "user", status: "active" });
+  store.change(admin.id, factoryAdmin.id, store.lookup(env.issuer, "oidc|factory-admin").revision,
+    { kind: "product-administrator", product: "factory", status: "active" }, "factory");
+
+  const member = store.register(env.issuer, "oidc|factory-member", "factory-member@onesa.test");
+  store.change(admin.id, member.id, member.revision, { kind: "status", status: "active" });
+  store.change(admin.id, member.id, store.lookup(env.issuer, "oidc|factory-member").revision,
+    { kind: "grant", product: "factory", role: "user", status: "active" });
+
+  const entry = await call("/admin?product=factory");
+  assert.equal(entry.status, 303);
+  assert.equal(new URL(entry.headers.get("location"), env.origin).searchParams.get("return"),
+    "/admin?product=factory");
+  const actor = await login("factory-admin", "/admin?product=factory");
+  assert.equal(actor.url, "/admin?product=factory");
+  const page = await call(actor.url, "GET", undefined, { cookie: actor.cookie });
+  const html = await page.text();
+  assert.equal(page.status, 200);
+  assert.match(html, /Smart Factory administrators/);
+  assert.match(html, /Add administrator/);
+  const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
+  const add = await call("/admin/change", "POST", new URLSearchParams({
+    csrf,
+    kind: "product-administrator",
+    product: "factory",
+    status: "active",
+    email: "factory-member@onesa.test",
+  }), { cookie: actor.cookie, origin: env.origin });
+  assert.equal(add.status, 303);
+  assert.ok(store.activeProductAdministrator(member.id, "factory"));
+  assert.equal(store.activeGrant(member.id, "factory").role, "user", "administrator assignment keeps the member grant");
+  const audit = store.one("SELECT actor,action,detail FROM audit WHERE target=? ORDER BY seq DESC LIMIT 1", member.id);
+  assert.equal(audit.actor, factoryAdmin.id);
+  assert.equal(audit.action, "administrator-grant");
+  assert.deepEqual(JSON.parse(audit.detail), { product: "factory", role: "administrator", status: "active" });
+
+  const decide = () => call("/internal/decision", "POST", JSON.stringify({
+    subject: "oidc|factory-member",
+    audience: "https://api.factory.onesa.test",
+    client: "factory-web",
+  }), { authorization: "Bearer " + env.policyKey });
+  const decision = await decide();
+  assert.equal(decision.status, 200);
+  assert.deepEqual((await decision.json()).roles, ["administrator"]);
+
+  const crossProduct = await call("/admin/change", "POST", new URLSearchParams({
+    csrf,
+    kind: "product-administrator",
+    product: "ai",
+    status: "active",
+    email: "factory-member@onesa.test",
+  }), { cookie: actor.cookie, origin: env.origin });
+  assert.equal(crossProduct.status, 403);
+  assert.equal(store.activeProductAdministrator(member.id, "ai"), undefined);
+
+  const refreshed = await call("/admin?product=factory", "GET", undefined, { cookie: actor.cookie });
+  const refreshedHtml = await refreshed.text();
+  const memberRow = refreshedHtml.slice(refreshedHtml.indexOf("factory-member@onesa.test"));
+  const fields = new URLSearchParams();
+  const firstForm = memberRow.match(/<form\b[^>]*>([\s\S]*?)<\/form>/)?.[1] || "";
+  for (const input of firstForm.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g))
+    fields.set(input[1], input[2]);
+  fields.set("status", "revoked");
+  const remove = await call("/admin/change", "POST", fields, { cookie: actor.cookie, origin: env.origin });
+  assert.equal(remove.status, 303);
+  assert.equal(store.activeProductAdministrator(member.id, "factory"), undefined);
+  assert.equal(store.activeGrant(member.id, "factory").role, "user", "removing administrator leaves ordinary access intact");
+  assert.deepEqual((await (await decide()).json()).roles, ["user"]);
+  assert.equal(store.one("SELECT action FROM audit WHERE target=? ORDER BY seq DESC LIMIT 1", member.id).action,
+    "administrator-revoke");
+});
+
+test("scoped product administrator grants survive an audited Identity recovery replay", () => {
+  const source = openStore(":memory:");
+  const restored = openStore(":memory:");
+  try {
+    const administrator = randomUUID();
+    const snapshot = {
+      version: 1,
+      accounts: [{ id: administrator, email: "admin@onesa.test", status: "active", role: "member" }],
+      grants: [], docs: [], registrations: [], drone_memberships: [],
+    };
+    for (const store of [source, restored])
+      applySnapshot(store, "product-administrator-recovery", snapshot, [], env.issuer);
+    source.run("INSERT INTO links VALUES(?,?,?,?)", env.issuer, "provider|product-admin", administrator, "verified");
+    source.change("system:test", administrator, 1, {
+      kind: "product-administrator", product: "factory", status: "active",
+    }, "factory");
+    const delta = rollbackDelta(source, "product-administrator-recovery");
+    assert.equal(delta.changed[0].product_administrators[0].status, "active");
+    replayDelta(restored, delta);
+    assert.ok(restored.activeProductAdministrator(administrator, "factory"));
+    assert.equal(replayDelta(restored, delta).replay, true);
+    restored.run("UPDATE product_administrators SET status='revoked' WHERE id=?", administrator);
+    assert.throws(() => replayDelta(restored, delta), /divergent product administrators/);
+  } finally {
+    source.db.close();
+    restored.db.close();
+  }
+});
+
 test("policy decisions reject active grants whose role is not allowed for that product", async (t) => {
   const { store, call } = await fixture(t);
   const user = store.register(env.issuer, "fixture|malformed-farmer-role", "malformed-farmer@onesa.test");
@@ -551,7 +689,7 @@ test("policy decisions reject active grants whose role is not allowed for that p
     "INSERT INTO grants VALUES(?,?,?,?)",
     user.id,
     "farmer",
-    "admin",
+    "administrator",
     "active",
   );
   const response = await call(
@@ -672,7 +810,7 @@ test("Identity administrator bootstrap requires the configured issuer and ignore
     const previous = store.register(env.issuer, "auth0|previous-admin", "previous@onesa.test");
     store.change("test", previous.id, 1, { kind: "status", status: "active" });
     store.change("test", previous.id, 2, {
-      kind: "grant", product: "identity", role: "admin", status: "active",
+      kind: "grant", product: "identity", role: "administrator", status: "active",
     });
     store.change("test", previous.id, 3, { kind: "status", status: "suspended" });
 
@@ -684,7 +822,7 @@ test("Identity administrator bootstrap requires the configured issuer and ignore
     const replacement = store.register(env.issuer, "auth0|replacement-admin", "replacement@onesa.test");
     bootstrapIdentityAdmin(store, env.issuer, replacement.id, "independent-owner-approval");
     assert.equal(store.lookup(env.issuer, "auth0|replacement-admin").status, "active");
-    assert.equal(store.activeGrant(replacement.id, "identity").role, "admin");
+    assert.equal(store.activeGrant(replacement.id, "identity").role, "administrator");
     assert.equal(store.activeGrant(previous.id, "identity"), undefined);
     assert.throws(
       () => bootstrapIdentityAdmin(store, env.issuer, foreign.id, "second-approval"),
@@ -762,7 +900,7 @@ test("schema-based import is idempotent; stale snapshot cannot erase post-cutove
       ],
       grants: [
         { id: second, product: "farmer", role: "user", status: "active" },
-        { id: owner, product: "pasofi", role: "admin", status: "active" },
+        { id: owner, product: "pasofi", role: "administrator", status: "active" },
       ],
       docs: [{ id: second, membership_id, enabled: true }],
       drone_memberships: [],
@@ -853,7 +991,7 @@ test("legacy import preserves explicit Portal and Engineering grant decisions ov
       grants: [
         { id: portalUser, product: "portal", role: "editor", status: "active" },
         { id: docsUser, product: "engineering-documents", role: "viewer", status: "revoked" },
-        { id: identityAdmin, product: "identity", role: "admin", status: "active" },
+        { id: identityAdmin, product: "identity", role: "administrator", status: "active" },
         { id: explicitAdmin, product: "portal", role: "administrator", status: "active" },
       ],
       docs: [
@@ -1614,9 +1752,9 @@ test("explicit Portal and product administrator grants always require MFA", asyn
   for (const [product, role] of [
     ["portal", "administrator"],
     ["portal", "owner"],
-    ["ai", "admin"],
+    ["ai", "administrator"],
     ["security", "owner"],
-    ["factory", "admin"],
+    ["factory", "administrator"],
   ]) {
     grant(product, role);
     const response = await decide(product);

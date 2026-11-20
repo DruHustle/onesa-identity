@@ -7,7 +7,7 @@ const mfa = "http://schemas.openid.net/pape/policies/2007/06/multi-factor";
 const operation = "urn:onesa:authentication:operation-mfa";
 const nonce = "Abcd1234".repeat(6);
 const ns = "https://onesa.eu/claims/";
-const decision = { user_id: "28994d67-999a-4a13-886b-9fafb2d54fc2", product: "portal", roles: ["admin"] };
+const decision = { user_id: "28994d67-999a-4a13-886b-9fafb2d54fc2", product: "portal", roles: ["administrator"] };
 
 function fixture() {
   const claims = {}, challenges = [], enrollments = [], denials = [];
@@ -155,7 +155,7 @@ test("normal shared-admin login without an ACR challenges before issuing the app
   assert.deepEqual(f.claims, {});
   f.event.authentication.methods.push({ name: "mfa", timestamp: new Date().toISOString() });
   await policy.onExecutePostLogin(f.event, f.api);
-  assert.deepEqual(f.claims[ns + "roles"], ["admin"]);
+  assert.deepEqual(f.claims[ns + "roles"], ["administrator"]);
   assert.deepEqual(f.claims[ns + "products"], ["ai"]);
   response = { ...decision, roles: ["administrator"], require_mfa: true, portal_staff_registration: true };
   await policy.onExecutePostLogin(f.event, f.api);

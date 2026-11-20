@@ -66,8 +66,8 @@ test("revoked, non-administrator and wrong-product grants never produce an infra
     { ...allowed, roles: ["editor"] },
     { ...allowed, roles: ["viewer"] },
     { ...allowed, roles: ["administrator", "editor"] },
-    { ...allowed, product: "security", roles: ["admin"] },
-    { ...allowed, product: "identity", roles: ["admin"] },
+    { ...allowed, product: "security", roles: ["administrator"] },
+    { ...allowed, product: "identity", roles: ["administrator"] },
     { selfservice: true },
   ];
   for (const value of invalid) {

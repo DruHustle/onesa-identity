@@ -31,7 +31,7 @@ export function bootstrapIdentityAdmin(store, issuer, id, receipt) {
     // independently authorized replacement administrator from bootstrapping.
     if (
       store.one(
-        "SELECT g.id FROM grants g JOIN accounts a USING(id) WHERE g.product='identity' AND g.role='admin' AND g.status='active' AND a.status='active' LIMIT 1",
+        "SELECT g.id FROM grants g JOIN accounts a USING(id) WHERE g.product='identity' AND g.role='administrator' AND g.status='active' AND a.status='active' LIMIT 1",
       )
     )
       throw Error(
@@ -56,7 +56,7 @@ export function bootstrapIdentityAdmin(store, issuer, id, receipt) {
       id,
     );
     store.run(
-      "INSERT INTO grants VALUES(?,'identity','admin','active') ON CONFLICT(id,product) DO UPDATE SET role='admin',status='active'",
+      "INSERT INTO grants VALUES(?,'identity','administrator','active') ON CONFLICT(id,product) DO UPDATE SET role='administrator',status='active'",
       id,
     );
     store.audit("bootstrap", "identity-admin", id, { receipt, issuer });

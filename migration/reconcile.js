@@ -29,6 +29,7 @@ function captureBaseline(store) {
   const inventories = [
     ["account", store.all("SELECT * FROM accounts ORDER BY id"), (row) => row.id],
     ["grant", store.all("SELECT * FROM grants ORDER BY id,product"), (row) => row.id + "/" + row.product],
+    ["product-administrator", store.all("SELECT * FROM product_administrators ORDER BY id,product"), (row) => row.id + "/" + row.product],
     ["link", store.all("SELECT * FROM links ORDER BY issuer,subject"), (row) => digest(row.issuer + "\\0" + row.subject)],
   ];
   for (const [kind, rows, key] of inventories)
@@ -60,6 +61,12 @@ function verifyBaselineIntegrity(store, changedIds = new Set()) {
     {
       kind: "grant",
       rows: () => store.all("SELECT * FROM grants ORDER BY id,product"),
+      key: (row) => row.id + "/" + row.product,
+      owner: (row) => row.id,
+    },
+    {
+      kind: "product-administrator",
+      rows: () => store.all("SELECT * FROM product_administrators ORDER BY id,product"),
       key: (row) => row.id + "/" + row.product,
       owner: (row) => row.id,
     },
@@ -213,7 +220,7 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         pending.push({ kind: "review-product-grant", id: g.id + "/" + g.product });
       } else if (
         (g.product === "portal" && ["owner", "administrator"].includes(g.role)) ||
-        (configurableAdminRoles.has(g.product) && g.role === "admin")
+        (configurableAdminRoles.has(g.product) && g.role === "administrator")
       ) {
         // Legacy elevated roles need an independent decision before issuance.
         pending.push({ kind: "review-product-grant", id: g.id + "/" + g.product });
@@ -447,6 +454,15 @@ export function replayDelta(store, bundle) {
         );
         check(JSON.stringify(grants) === JSON.stringify(expectedGrants),
           "Recovery target has divergent grants");
+        const administrators = store.all(
+          "SELECT * FROM product_administrators WHERE id=? ORDER BY product",
+          x.account.id,
+        );
+        const expectedAdministrators = [...(x.product_administrators || [])].sort(
+          (a, b) => a.product.localeCompare(b.product),
+        );
+        check(JSON.stringify(administrators) === JSON.stringify(expectedAdministrators),
+          "Recovery target has divergent product administrators");
       }
       clearResolvedProofs(store);
       store.run("DELETE FROM sessions");
@@ -503,6 +519,22 @@ export function replayDelta(store, bundle) {
           g.status,
         );
       }
+      store.run("DELETE FROM product_administrators WHERE id=?", a.id);
+      for (const administrator of x.product_administrators || []) {
+        check(
+          administrator.id === a.id &&
+            Object.hasOwn(products, administrator.product) &&
+            administrator.status === "active",
+          "Invalid recovered product administrator",
+        );
+        store.run(
+          "INSERT INTO product_administrators(id,product,status,revision) VALUES(?,?,?,?)",
+          administrator.id,
+          administrator.product,
+          administrator.status,
+          administrator.revision,
+        );
+      }
     }
     // Initial replay must also detect extra or altered provider links left
     // behind by a restored database. Never keep unverified login ownership.
@@ -538,6 +570,7 @@ export function rollbackDelta(store, key) {
       account: store.one("SELECT * FROM accounts WHERE id=?", id),
       links: store.all("SELECT * FROM links WHERE id=?", id),
       grants: store.all("SELECT * FROM grants WHERE id=?", id),
+      product_administrators: store.all("SELECT * FROM product_administrators WHERE id=?", id),
     }));
     return {
       version: 2,

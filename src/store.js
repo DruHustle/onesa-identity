@@ -4,19 +4,19 @@ import { DatabaseSync } from "node:sqlite";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 export const products = {
-  identity: ["admin"],
-  security: ["viewer", "analyst", "admin", "owner"],
+  identity: ["administrator"],
+  security: ["viewer", "analyst", "administrator", "owner"],
   portal: ["owner", "administrator", "editor", "business", "hr", "viewer"],
-  "internal-documents": ["viewer", "editor", "admin"],
-  "engineering-documents": ["viewer", "editor", "admin"],
-  farmer: ["user", "admin"],
-  logistics: ["user", "admin"],
-  factory: ["user", "admin"],
-  ai: ["user", "admin"],
-  drone: ["viewer", "operator", "admin"],
-  robot: ["viewer", "operator", "admin"],
+  "internal-documents": ["viewer", "editor", "administrator"],
+  "engineering-documents": ["viewer", "editor", "administrator"],
+  farmer: ["user", "administrator"],
+  logistics: ["user", "administrator"],
+  factory: ["user", "administrator"],
+  ai: ["user", "administrator"],
+  drone: ["viewer", "operator", "administrator"],
+  robot: ["viewer", "operator", "administrator"],
   mobile: [
-    "admin",
+    "administrator",
     "operations",
     "support",
     "finance",
@@ -24,7 +24,7 @@ export const products = {
     "auditor",
     "customer",
   ],
-  pasofi: ["customer", "agent", "support", "admin"],
+  pasofi: ["customer", "agent", "support", "administrator"],
 };
 // Self-service requests use the lowest product role. Administrators assign operational roles.
 export const accountProducts = new Map([
@@ -61,7 +61,7 @@ export function sharedRole(product, tiers, adminRoleEnabled) {
   if (!sharedProducts.has(product)) return null;
   if (tiers.get("admin") === "active") {
     const elevated = !configurableAdminRoles.has(product) || adminRoleEnabled;
-    return elevated ? "admin" : accountProducts.get(product).role;
+    return elevated ? "administrator" : accountProducts.get(product).role;
   }
   return tiers.get("user") === "active" ? accountProducts.get(product).role : null;
 }
@@ -115,6 +115,13 @@ export function openStore(path, { existingOnly = false } = {}) {
       evidence TEXT NOT NULL, PRIMARY KEY(issuer,subject), UNIQUE(issuer,id));
     CREATE TABLE IF NOT EXISTS grants(id TEXT NOT NULL REFERENCES accounts, product TEXT NOT NULL, role TEXT NOT NULL,
       status TEXT NOT NULL CHECK(status IN ('pending','active','revoked','rejected')), PRIMARY KEY(id,product));
+    CREATE TABLE IF NOT EXISTS product_administrators(
+      id TEXT NOT NULL REFERENCES accounts,
+      product TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('active','revoked')),
+      revision INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY(id,product)
+    );
     CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT, detail TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS invites(hash TEXT PRIMARY KEY, email TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS challenges(hash TEXT PRIMARY KEY, state TEXT NOT NULL, nonce TEXT NOT NULL, verifier TEXT NOT NULL, destination TEXT NOT NULL, expires INTEGER NOT NULL);
@@ -274,6 +281,12 @@ export function openStore(path, { existingOnly = false } = {}) {
       id,
       product,
     );
+  const activeProductAdministrator = (id, product) =>
+    one(
+      "SELECT 1 FROM product_administrators JOIN accounts USING(id) WHERE id=? AND product=? AND product_administrators.status='active' AND accounts.status='active'",
+      id,
+      product,
+    );
   function recordRequest(id, tier, existing = true) {
     check(tier === "user" || tier === "admin", "Invalid registration type");
     if (registrations(db, id).has(tier)) return;
@@ -422,7 +435,7 @@ export function openStore(path, { existingOnly = false } = {}) {
       check(account && ["active", "pending"].includes(account.status), "Account unavailable");
       // Losing the only governance administrator would prevent independent
       // reviews and reconciliation of the deletion request.
-      check(activeGrant(id, "identity")?.role !== "admin", "Transfer Identity administration before requesting closure");
+      check(activeGrant(id, "identity")?.role !== "administrator", "Transfer Identity administration before requesting closure");
       const now = Date.now();
       run("INSERT INTO account_deletion_requests VALUES(?,?,'requested')", id, now);
       for (const target of deletionTargets)
@@ -438,13 +451,58 @@ export function openStore(path, { existingOnly = false } = {}) {
       return { requestedAt: now, status: "requested", repeated: false };
     });
   }
-  function change(actor, id, revision, operation) {
+  function change(actor, id, revision, operation, scopeProduct = null) {
     return atomic(() => {
       const current = one("SELECT * FROM accounts WHERE id=?", id);
       check(
         current && current.revision === revision,
         "Account changed; reload before editing",
       );
+      if (scopeProduct) {
+        check(Object.hasOwn(products, scopeProduct), "Product unavailable");
+        check(
+          operation.kind === "product-administrator" && operation.product === scopeProduct,
+          "Product administrators may only manage their own administrator list",
+        );
+        check(actor !== id, "Ask another product administrator to change your own access");
+        check(current.status === "active", "Administrator access requires an active Onesa account");
+        check(one("SELECT 1 FROM links WHERE id=? LIMIT 1", id), "A verified Onesa account is required");
+        check(["active", "revoked"].includes(operation.status), "Invalid administrator state");
+        if (operation.status === "revoked") {
+          const remaining = one(
+            "SELECT (SELECT count(*) FROM product_administrators JOIN accounts USING(id) WHERE product=? AND product_administrators.status='active' AND accounts.status='active') + (SELECT count(*) FROM grants JOIN accounts USING(id) WHERE product=? AND role='administrator' AND grants.status='active' AND accounts.status='active') AS n",
+            scopeProduct,
+            scopeProduct,
+          ).n;
+          check(remaining > 1, "Keep at least one active product administrator");
+        }
+        const explicitAdministrator = one(
+          "SELECT 1 FROM grants WHERE id=? AND product=? AND role='administrator' AND status='active'",
+          id,
+          scopeProduct,
+        );
+        if (operation.status === "revoked" && explicitAdministrator) {
+          run(
+            "UPDATE grants SET status='revoked' WHERE id=? AND product=? AND role='administrator' AND status='active'",
+            id,
+            scopeProduct,
+          );
+        } else {
+          run(
+            "INSERT INTO product_administrators(id,product,status) VALUES(?,?,?) ON CONFLICT(id,product) DO UPDATE SET status=excluded.status,revision=product_administrators.revision+1",
+            id,
+            scopeProduct,
+            operation.status,
+          );
+        }
+        run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
+        audit(actor, operation.status === "active" ? "administrator-grant" : "administrator-revoke", id, {
+          product: scopeProduct,
+          role: "administrator",
+          status: operation.status,
+        });
+        return;
+      }
       if (operation.kind === "status") {
         check(
           ["active", "pending", "suspended", "rejected"].includes(
@@ -464,7 +522,7 @@ export function openStore(path, { existingOnly = false } = {}) {
         if (operation.status !== "active")
           run("DELETE FROM sessions WHERE id=?", id);
       } else if (operation.kind === "registration") {
-        check(actor !== id && activeGrant(actor, "identity")?.role === "admin", "Independent Identity administrator required");
+        check(actor !== id && activeGrant(actor, "identity")?.role === "administrator", "Independent Identity administrator required");
         const previous = registrations(db, id).get(operation.tier);
         check(previous && (
           (["pending", "revoked", "rejected"].includes(previous) && operation.status === "active") ||
@@ -507,6 +565,24 @@ export function openStore(path, { existingOnly = false } = {}) {
       audit(actor, operation.kind, id, operation);
     });
   }
+  const legacyAdministratorGrants = all(
+    "SELECT id,product,status FROM grants WHERE role='admin'",
+  ).filter((grant) => products[grant.product]?.includes("administrator"));
+  if (legacyAdministratorGrants.length) atomic(() => {
+    for (const grant of legacyAdministratorGrants) {
+      run(
+        "UPDATE grants SET role='administrator' WHERE id=? AND product=? AND role='admin'",
+        grant.id,
+        grant.product,
+      );
+      audit("system:administrator-role-migration", "administrator-role-renamed", grant.id, {
+        product: grant.product,
+        from: "admin",
+        to: "administrator",
+        status: grant.status,
+      });
+    }
+  });
   return {
     currentFile,
     db,
@@ -520,6 +596,7 @@ export function openStore(path, { existingOnly = false } = {}) {
     atomic,
     lookup,
     activeGrant,
+    activeProductAdministrator,
     register,
     requestAccess,
     requestRegistration,
