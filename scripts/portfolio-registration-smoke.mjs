@@ -26,7 +26,7 @@ const cases = [
   ["onesa-documents", "Public Docs", "page", "https://docs.onesa.eu/"],
   ["onesa-documents", "Internal Docs gate", "private", "https://docs.internal.onesa.eu/"],
   ...products.filter(([,product])=>product!=="portal"&&product!=="internal-documents")
-    .map(([repo,product]) => [repo,"Web registration return","page",targets.get(product + "/web/user")]),
+    .map(([repo,product]) => [repo,"Web registration return",product === "security" ? "private" : "page",targets.get(product + "/web/user")]),
 ];
 const registeredNative = products.flatMap(([repo,product,platforms]) =>
   platforms.filter(platform => platform !== "web").flatMap(platform =>
@@ -74,7 +74,7 @@ async function probe([repo,surface,kind,url]) {
       row.evidence = accepted ? "Auth0 Code + PKCE start; no account created" : "No approved Auth0 PKCE redirect";
      } else if (kind === "private") {
       accepted = [302,303,307,308,401,403].includes(response.status);
-      row.evidence = accepted ? "Unauthenticated access gated; authorized Docs not verified" : "Internal Documents did not enforce an expected access gate";
+      row.evidence = accepted ? "Unauthenticated access gated; authorized access not verified" : "Internal Documents did not enforce an expected access gate";
     } else if (kind === "portal") {
       const html = response.status === 200 ? await response.text() : "";
       accepted = response.status === 200 && html.includes("Continue to Onesa Identity") &&
@@ -83,6 +83,11 @@ async function probe([repo,surface,kind,url]) {
     } else {
       accepted = response.status >= 200 && response.status < 400;
       row.evidence = accepted ? "HTTP entry only; browser/signup not verified" : "Web return unavailable";
+    }
+    if (response.status >= 500) {
+      const edge = response.headers.get("server")?.slice(0, 40) || "unspecified";
+      const ray = response.headers.get("cf-ray")?.slice(0, 60) || "none";
+      row.evidence += "; upstream error; edge=" + edge + "; cf-ray=" + ray;
     }
     row.result = accepted ? (kind === "page" ? "ENTRY-ONLY" : "REACHABLE") : "NO-GO";
   } catch (error) {
