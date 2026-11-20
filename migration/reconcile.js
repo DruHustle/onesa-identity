@@ -160,6 +160,9 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
       // address. Do not silently import ambiguous contact ownership or an
       // address that the live registration path would later refuse.
       const email = typeof u.email === "string" ? u.email.trim().toLowerCase() : "";
+      // Older Portal rows used "admin"; keep the grant while migrating to the
+      // canonical Onesa role name.
+      const portalRole = u.role === "admin" ? "administrator" : u.role;
       check(
         uuid(u.id) &&
           !ids.has(u.id) &&
@@ -170,7 +173,7 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         "Conflicting account snapshot",
       );
       check(
-        u.role === "member" || products.portal.includes(u.role),
+        portalRole === "member" || products.portal.includes(portalRole),
         "Unknown Portal role",
       );
       ids.add(u.id);
@@ -185,13 +188,13 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
           "INSERT INTO grants VALUES(?,?,?,?)",
           u.id,
           "portal",
-          u.role,
-          ["owner", "administrator"].includes(u.role) ? "pending" : "active",
+          portalRole,
+          ["owner", "administrator"].includes(portalRole) ? "pending" : "active",
         );
       // Old global-admin and implicit Farmer rights require an explicit resource-owner disposition.
-      if (u.role !== "member")
+      if (portalRole !== "member")
         pending.push({ kind: "legacy-implicit-access", id: u.id });
-      if (["owner", "administrator"].includes(u.role))
+      if (["owner", "administrator"].includes(portalRole))
         pending.push({ kind: "review-product-grant", id: u.id + "/portal" });
     }
     function grant(row) {
@@ -209,7 +212,13 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         row.status,
       );
     }
-    for (const g of snapshot.grants) {
+    for (const sourceGrant of snapshot.grants) {
+      // The canonical role changed from "admin" to "administrator". Normalize
+      // the imported row but retain the source snapshot verbatim for recovery.
+      const g =
+        sourceGrant?.role === "admin"
+          ? { ...sourceGrant, role: "administrator" }
+          : sourceGrant;
       if (
         (g.product === "pasofi" && g.role !== "customer") ||
         g.product === "internal-documents" ||
