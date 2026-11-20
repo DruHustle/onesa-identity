@@ -1,6 +1,6 @@
 import * as oidc from "openid-client";
 import { returnKey } from "./registration-returns.js";
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { secret, digest, Rejected, products, accountProducts, registrations, sharedRole, configurableAdminRoles } from "./store.js";
 
 const esc = (value) =>
@@ -59,6 +59,36 @@ const page = (title, body, status = 200, wide = false) =>
     <main${wide ? ' class="wide"' : ""}><h1>${esc(title)}</h1>${body}</main></body></html>`,
     { status, headers: { "content-type": "text/html; charset=utf-8" } },
   );
+const failureReference = () => randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase();
+const logSignInFailure = (reference, stage, errorClass = "Error") => {
+  const safeClass = /^[A-Za-z0-9_.-]{1,64}$/.test(errorClass) ? errorClass : "Error";
+  console.error(JSON.stringify({ event: "identity_sign_in_failed", reference, stage, errorClass: safeClass }));
+};
+const signInFailure = (code, description, destination, origin) => {
+  const retry = '<a href="' + esc(retryPath(destination, origin)) + '">Try sign-in again</a>';
+  const messages = {
+    access_denied: ["Access not approved", "Onesa could not approve access for this sign-in. Check that your email is verified, your account is active, and the required product role has been assigned. If you believe this is a mistake, contact your Onesa administrator.", 403],
+    login_required: ["Sign-in session expired", "Your sign-in session expired before it could finish. Start again from the product you were trying to access.", 401],
+    interaction_required: ["Sign-in needs another step", "The sign-in flow needs you to complete an additional step. Start again and finish any verification or multi-factor prompt.", 401],
+    consent_required: ["Authorization needs to be renewed", "Onesa needs you to restart sign-in so it can renew the authorization for this application.", 401],
+    temporarily_unavailable: ["Sign-in service temporarily unavailable", "The identity provider is temporarily unable to complete sign-in. Wait a moment, then retry.", 503],
+    server_error: ["Sign-in service error", "The identity provider could not complete the request. Retry in a moment. If it keeps happening, contact Onesa support.", 502],
+    invalid_request: ["Sign-in request could not be validated", "The sign-in request is incomplete or expired. Return to the product and start sign-in again.", 400],
+    invalid_grant: ["Sign-in could not be completed", "The authorization code expired or was already used. Start a fresh sign-in from the product.", 400],
+  };
+  const known = messages[code];
+  if (known) {
+    let detail = "";
+    if (code === "access_denied" && /could not verify a fresh second factor/i.test(description || ""))
+      detail = "Onesa could not verify a recent multi-factor check. Sign in again and complete the authenticator prompt.";
+    else if (code === "access_denied" && /access is temporarily unavailable|access is unavailable for this application/i.test(description || ""))
+      detail = "Onesa access policy is unavailable right now. Wait a moment and retry.";
+    return page(known[0], esc(detail || known[1]) + " " + retry, known[2]);
+  }
+  const reference = failureReference();
+  logSignInFailure(reference, "provider_callback", "UnrecognizedOAuthError");
+  return page("Sign-in could not be completed", "Onesa received an unexpected sign-in response. Retry from the product. If it happens again, contact support and provide reference <strong>" + reference + "</strong>. " + retry, 502);
+};
 const redirect = (url, cookies = []) => {
   const headers = new Headers({ location: url });
   for (const c of cookies) headers.append("set-cookie", c);
@@ -318,23 +348,24 @@ export function createApp(store, env, client = authClient(env)) {
         const retry = resume ? retryPath(resume.destination, env.origin) : "/login";
         return page("Sign-in expired", '<a href="' + esc(retry) + '">Start sign-in again</a>', 400);
       }
-      if (url.searchParams.get("error")) {
-        return page(
-          "Sign-in unavailable",
-          '<a href="' + esc(retryPath(flow.destination, env.origin)) + '">Try again</a>',
-          403,
+      const oauthError = url.searchParams.get("error");
+      if (oauthError)
+        return signInFailure(
+          oauthError,
+          url.searchParams.get("error_description") || "",
+          flow.destination,
+          env.origin,
         );
-      }
       let identity;
       try {
         identity = await client.redeem(url, flow);
-      } catch {
-        // The challenge is one-use and has already been consumed. Preserve a
-        // valid invitation in a safe local retry link if token exchange or
-        // OIDC verification fails transiently.
+      } catch (error) {
+        // Do not expose provider details or credentials in the browser.
+        const reference = failureReference();
+        logSignInFailure(reference, "token_exchange_or_oidc_validation", error?.name || "Error");
         return page(
-          "Sign-in temporarily unavailable",
-          '<a href="' + esc(retryPath(flow.destination, env.origin)) + '">Try again</a>',
+          "Onesa could not complete sign-in",
+          "The identity provider response could not be verified or exchanged. Start again from the product. If this continues, contact support and provide reference <strong>" + reference + "</strong>. <a href=\"" + esc(retryPath(flow.destination, env.origin)) + "\">Try sign-in again</a>",
           503,
         );
       }
@@ -366,7 +397,7 @@ export function createApp(store, env, client = authClient(env)) {
       );
       target.searchParams.delete("enrollment");
       if (["suspended", "rejected"].includes(user.status))
-        return page("Account unavailable", "", 403);
+        return page("Account access is disabled", "This Onesa account is currently suspended or its access request was declined. Contact your Onesa administrator if you believe this is a mistake.", 403);
       const session = secret(),
         csrf = secret(),
         now = Date.now();
@@ -668,14 +699,17 @@ export function createApp(store, env, client = authClient(env)) {
     try {
       response = await handle(req);
     } catch (e) {
-      response =
-        e instanceof Rejected
-          ? page("Request needs review", esc(e.message), 409)
-          : page(
-              "Identity temporarily unavailable",
-              "Retry from the application where you started.",
-              503,
-            );
+      if (e instanceof Rejected) {
+        response = page("Request needs review", esc(e.message), 409);
+      } else {
+        const reference = failureReference();
+        logSignInFailure(reference, "request_handler", e?.name || "Error");
+        response = page(
+          "Onesa could not complete this request",
+          "A server-side error interrupted the request. Retry from the application where you started. If it continues, contact support and provide reference <strong>" + reference + "</strong>.",
+          503,
+        );
+      }
     }
     response.headers.set("cache-control", "no-store");
     response.headers.set("referrer-policy", "same-origin");
