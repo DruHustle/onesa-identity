@@ -649,6 +649,24 @@ test("product administrators manage only their product list and removals preserv
   assert.deepEqual((await (await decide()).json()).roles, ["user"]);
   assert.equal(store.one("SELECT action FROM audit WHERE target=? ORDER BY seq DESC LIMIT 1", member.id).action,
     "administrator-revoke");
+
+  const centrallyAssigned = store.register(env.issuer, "oidc|central-factory-admin", "central-factory-admin@onesa.test");
+  store.change(admin.id, centrallyAssigned.id, centrallyAssigned.revision, { kind: "status", status: "active" });
+  store.change(admin.id, centrallyAssigned.id, store.lookup(env.issuer, "oidc|central-factory-admin").revision,
+    { kind: "grant", product: "factory", role: "administrator", status: "active" });
+  const directPage = await call("/admin?product=factory", "GET", undefined, { cookie: actor.cookie });
+  const directHtml = await directPage.text();
+  const directRow = directHtml.slice(directHtml.indexOf("central-factory-admin@onesa.test"));
+  const directForm = directRow.match(/<form\b[^>]*>([\s\S]*?)<\/form>/)?.[1] || "";
+  const directFields = new URLSearchParams();
+  for (const input of directForm.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g))
+    directFields.set(input[1], input[2]);
+  directFields.set("status", "revoked");
+  const removeDirect = await call("/admin/change", "POST", directFields, { cookie: actor.cookie, origin: env.origin });
+  assert.equal(removeDirect.status, 303);
+  assert.equal(store.activeGrant(centrallyAssigned.id, "factory"), undefined);
+  assert.equal(store.one("SELECT action FROM audit WHERE target=? ORDER BY seq DESC LIMIT 1", centrallyAssigned.id).action,
+    "administrator-revoke");
 });
 
 test("scoped product administrator grants survive an audited Identity recovery replay", () => {
