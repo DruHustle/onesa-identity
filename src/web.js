@@ -1,6 +1,6 @@
 import * as oidc from "openid-client";
 import { returnKey } from "./registration-returns.js";
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { secret, digest, Rejected, products, accountProducts, registrations, sharedRole, configurableAdminRoles } from "./store.js";
 
 const esc = (value) =>
@@ -33,32 +33,67 @@ const page = (title, body, status = 200, wide = false) =>
     <title>${esc(title)} · Onesa Account</title>
     <style>
       * { box-sizing: border-box; }
-      body { margin: 0; padding: 24px clamp(16px, 5vw, 64px) 48px; background: #f5f7fa; color: #10263e; font: 1rem/1.55 Arial, Helvetica, sans-serif; }
-      header { max-width: 68rem; margin: 0 auto 36px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
-      header > a { display: flex; align-items: center; gap: 10px; color: #10263e; font-weight: 600; text-decoration: none; }
-      header img { width: 32px; height: 32px; }
-      main { margin: auto; max-width: 38rem; padding: clamp(22px, 5vw, 36px); background: white; border: 1px solid #d4dce5; border-radius: 16px; overflow-wrap: anywhere; }
+      body { margin: 0; padding: 24px clamp(16px, 5vw, 64px) 48px; background: #F5F8F7; color: #172B4D; font: 1rem/1.55 Arial, Helvetica, sans-serif; }
+      header { max-width: 68rem; margin: 0 auto 28px; padding: 8px 0 18px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #D9E6E1; }
+      header > a { display: flex; align-items: center; gap: 11px; color: #102B29; font-weight: 700; letter-spacing: -.02em; text-decoration: none; }
+      header img { width: 36px; height: 36px; }
+      main { margin: auto; max-width: 38rem; padding: clamp(22px, 5vw, 36px); background: #FFFFFF; border: 1px solid #D9E6E1; border-top: 4px solid #00B894; border-radius: 18px; box-shadow: 0 16px 48px rgba(16, 43, 41, .08); overflow-wrap: anywhere; }
       main.wide { max-width: 68rem; }
-      h1 { margin: 0 0 16px; font-size: clamp(1.75rem, 5vw, 2.25rem); line-height: 1.12; letter-spacing: -.045em; }
+      h1 { margin: 0 0 16px; color: #102B29; font-size: clamp(1.75rem, 5vw, 2.25rem); line-height: 1.12; letter-spacing: -.045em; }
       h2 { margin: 1.5rem 0 .5rem; font-size: 1.25rem; }
       p { margin: 0 0 1rem; }
-      .muted { color: #56677b; }
-      article { margin: 1rem 0; padding: 1rem; border: 1px solid #d4dce5; border-radius: 6px; }
+      .muted { color: #526B69; }
+      article { margin: 1rem 0; padding: 1rem; border: 1px solid #D9E6E1; border-radius: 10px; background: #FBFDFC; }
       .actions, nav, .products li { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1.25rem; }
       .products { padding: 0; list-style: none; }
       .products li { justify-content: space-between; padding: .7rem 0; border-bottom: 1px solid #d4dce5; }
       label { display: inline-grid; max-width: 100%; margin: .3rem; gap: .2rem; }
-      a { color: #1a51ac; text-underline-offset: 3px; }
-      input, select, button, .primary { max-width: 100%; min-height: 44px; padding: .55rem .75rem; font: inherit; border: 1px solid #6e7d90; border-radius: 6px; background: white; color: #10263e; }
+      a { color: #087F68; text-underline-offset: 3px; }
+      a:hover { color: #065C4E; }
+      input, select, button, .primary { max-width: 100%; min-height: 44px; padding: .55rem .75rem; font: inherit; border: 1px solid #9AAEAA; border-radius: 10px; background: white; color: #172B4D; }
       button, .primary { cursor: pointer; }
-      .primary { display: inline-flex; align-items: center; background: #2366d1; border-color: #2366d1; color: white; text-decoration: none; }
-      :is(a, button, input, select):focus-visible { outline: 2px solid #2366d1; outline-offset: 3px; }
+      .primary { display: inline-flex; align-items: center; background: #0B725E; border-color: #0B725E; color: white; text-decoration: none; }
+      .primary:hover { background: #095C4D; border-color: #095C4D; }
+      :is(a, button, input, select):focus-visible { outline: 3px solid #00B894; outline-offset: 3px; }
     </style></head><body>
     <header><a href="/account"><img src="https://onesa.eu/brand/icons/v1/onesa-company-180.png" alt="" width="32" height="32">Onesa Account</a>
     <nav aria-label="Account"><a href="/account">My account</a><a href="/admin">Administration</a></nav></header>
     <main${wide ? ' class="wide"' : ""}><h1>${esc(title)}</h1>${body}</main></body></html>`,
     { status, headers: { "content-type": "text/html; charset=utf-8" } },
   );
+const failureReference = () => randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase();
+const logSignInFailure = (reference, stage, errorClass = "Error") => {
+  const safeClass = typeof errorClass === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(errorClass) ? errorClass : "Error";
+  console.error(JSON.stringify({ event: "identity_sign_in_failed", reference, stage, errorClass: safeClass }));
+};
+const signInFailure = (code, description, destination, origin) => {
+  const retry = '<a href="' + esc(retryPath(destination, origin)) + '">Try sign-in again</a>';
+  const messages = {
+    access_denied: ["Access not approved", "Onesa could not approve access for this sign-in. Check that your email is verified, your account is active, and the required product role has been assigned. If you believe this is a mistake, contact your Onesa administrator.", 403],
+    login_required: ["Sign-in session expired", "Your sign-in session expired before it could finish. Start again from the product you were trying to access.", 401],
+    interaction_required: ["Sign-in needs another step", "The sign-in flow needs you to complete an additional step. Start again and finish any verification or multi-factor prompt.", 401],
+    consent_required: ["Authorization needs to be renewed", "Onesa needs you to restart sign-in so it can renew the authorization for this application.", 401],
+    temporarily_unavailable: ["Sign-in service temporarily unavailable", "The identity provider is temporarily unable to complete sign-in. Wait a moment, then retry.", 503],
+    server_error: ["Sign-in service error", "The identity provider could not complete the request. Retry in a moment. If it keeps happening, contact Onesa support.", 502],
+    invalid_request: ["Sign-in request could not be validated", "The sign-in request is incomplete or expired. Return to the product and start sign-in again.", 400],
+    invalid_grant: ["Sign-in could not be completed", "The authorization code expired or was already used. Start a fresh sign-in from the product.", 400],
+    mfa_required: ["Multi-factor authentication required", "Complete the multi-factor prompt to continue. If no prompt appears, restart sign-in and try again.", 403],
+    mfa_enrollment_needed: ["Authenticator setup required", "Set up the required authenticator for your Onesa account, then retry sign-in.", 403],
+    account_disabled: ["Onesa account disabled", "This Onesa account is disabled. Contact your Onesa administrator if you believe this is a mistake.", 403],
+  };
+  const known = Object.hasOwn(messages, code) ? messages[code] : null;
+  if (known) {
+    let detail = "";
+    if (code === "access_denied" && /could not verify a fresh second factor/i.test(description || ""))
+      detail = "Onesa could not verify a recent multi-factor check. Sign in again and complete the authenticator prompt.";
+    else if (code === "access_denied" && /access is temporarily unavailable|access is unavailable for this application/i.test(description || ""))
+      detail = "Onesa access policy is unavailable right now. Wait a moment and retry.";
+    return page(known[0], esc(detail || known[1]) + " " + retry, known[2]);
+  }
+  const reference = failureReference();
+  logSignInFailure(reference, "provider_callback", "UnrecognizedOAuthError");
+  return page("Sign-in could not be completed", "Onesa received an unexpected sign-in response. Retry from the product. If it happens again, contact support and provide reference <strong>" + reference + "</strong>. " + retry, 502);
+};
 const redirect = (url, cookies = []) => {
   const headers = new Headers({ location: url });
   for (const c of cookies) headers.append("set-cookie", c);
@@ -318,23 +353,24 @@ export function createApp(store, env, client = authClient(env)) {
         const retry = resume ? retryPath(resume.destination, env.origin) : "/login";
         return page("Sign-in expired", '<a href="' + esc(retry) + '">Start sign-in again</a>', 400);
       }
-      if (url.searchParams.get("error")) {
-        return page(
-          "Sign-in unavailable",
-          '<a href="' + esc(retryPath(flow.destination, env.origin)) + '">Try again</a>',
-          403,
+      const oauthError = url.searchParams.get("error");
+      if (oauthError)
+        return signInFailure(
+          oauthError,
+          url.searchParams.get("error_description") || "",
+          flow.destination,
+          env.origin,
         );
-      }
       let identity;
       try {
         identity = await client.redeem(url, flow);
-      } catch {
-        // The challenge is one-use and has already been consumed. Preserve a
-        // valid invitation in a safe local retry link if token exchange or
-        // OIDC verification fails transiently.
+      } catch (error) {
+        // Do not expose provider details or credentials in the browser.
+        const reference = failureReference();
+        logSignInFailure(reference, "token_exchange_or_oidc_validation", error?.name || "Error");
         return page(
-          "Sign-in temporarily unavailable",
-          '<a href="' + esc(retryPath(flow.destination, env.origin)) + '">Try again</a>',
+          "Onesa could not complete sign-in",
+          "The identity provider response could not be verified or exchanged. Start again from the product. If this continues, contact support and provide reference <strong>" + reference + "</strong>. <a href=\"" + esc(retryPath(flow.destination, env.origin)) + "\">Try sign-in again</a>",
           503,
         );
       }
@@ -366,7 +402,7 @@ export function createApp(store, env, client = authClient(env)) {
       );
       target.searchParams.delete("enrollment");
       if (["suspended", "rejected"].includes(user.status))
-        return page("Account unavailable", "", 403);
+        return page("Account access is disabled", "This Onesa account is currently suspended or its access request was declined. Contact your Onesa administrator if you believe this is a mistake.", 403);
       const session = secret(),
         csrf = secret(),
         now = Date.now();
@@ -668,14 +704,17 @@ export function createApp(store, env, client = authClient(env)) {
     try {
       response = await handle(req);
     } catch (e) {
-      response =
-        e instanceof Rejected
-          ? page("Request needs review", esc(e.message), 409)
-          : page(
-              "Identity temporarily unavailable",
-              "Retry from the application where you started.",
-              503,
-            );
+      if (e instanceof Rejected) {
+        response = page("Request needs review", esc(e.message), 409);
+      } else {
+        const reference = failureReference();
+        logSignInFailure(reference, "request_handler", e?.name || "Error");
+        response = page(
+          "Onesa could not complete this request",
+          "A server-side error interrupted the request. Retry from the application where you started. If it continues, contact support and provide reference <strong>" + reference + "</strong>.",
+          503,
+        );
+      }
     }
     response.headers.set("cache-control", "no-store");
     response.headers.set("referrer-policy", "same-origin");

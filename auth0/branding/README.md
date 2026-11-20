@@ -1,6 +1,6 @@
 # Hosted Onesa Account
 
-The production Auth0 Universal Login theme uses the Company Portal logo, colors, card and field shapes. English and German overrides cover the combined and identifier-first sign-in and registration screens. The application name is supplied by Auth0 for each transaction. Credential entry, MFA, recovery, account linking and approval follow their existing flows.
+The production Auth0 Universal Login theme uses the shared Onesa identity palette (deep forest, green, navy and soft mint), the Onesa logo, and rounded cards and fields. The account application uses the same palette and interaction styling. English and German overrides cover the combined and identifier-first sign-in and registration screens. The application name is supplied by Auth0 for each transaction. Credential entry, MFA, recovery, account linking and approval follow their existing flows.
 
 In the production Auth0 tenant language settings, keep English (`en`) as the default and enable German (`de`). Auth0 selects a supported language for each transaction using the requested `ui_locales` or the browser language. The branding sync manages translations for both languages; language enablement and the default remain tenant settings. [Auth0 Universal Login internationalization](https://auth0.com/docs/customize/internationalization-and-localization/universal-login-internationalization)
 
