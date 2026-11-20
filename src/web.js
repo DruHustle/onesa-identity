@@ -48,10 +48,12 @@ const page = (title, body, status = 200, wide = false) =>
       .products { padding: 0; list-style: none; }
       .products li { justify-content: space-between; padding: .7rem 0; border-bottom: 1px solid #d4dce5; }
       label { display: inline-grid; max-width: 100%; margin: .3rem; gap: .2rem; }
-      a { color: #087F68; text-underline-offset: 3px; }\n      a:hover { color: #065C4E; }
+      a { color: #087F68; text-underline-offset: 3px; }
+      a:hover { color: #065C4E; }
       input, select, button, .primary { max-width: 100%; min-height: 44px; padding: .55rem .75rem; font: inherit; border: 1px solid #9AAEAA; border-radius: 10px; background: white; color: #172B4D; }
       button, .primary { cursor: pointer; }
-      .primary { display: inline-flex; align-items: center; background: #0B725E; border-color: #0B725E; color: white; text-decoration: none; }\n      .primary:hover { background: #095C4D; border-color: #095C4D; }
+      .primary { display: inline-flex; align-items: center; background: #0B725E; border-color: #0B725E; color: white; text-decoration: none; }
+      .primary:hover { background: #095C4D; border-color: #095C4D; }
       :is(a, button, input, select):focus-visible { outline: 3px solid #00B894; outline-offset: 3px; }
     </style></head><body>
     <header><a href="/account"><img src="https://onesa.eu/brand/icons/v1/onesa-company-180.png" alt="" width="32" height="32">Onesa Account</a>
