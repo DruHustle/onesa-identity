@@ -61,7 +61,7 @@ const page = (title, body, status = 200, wide = false) =>
   );
 const failureReference = () => randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase();
 const logSignInFailure = (reference, stage, errorClass = "Error") => {
-  const safeClass = /^[A-Za-z0-9_.-]{1,64}$/.test(errorClass) ? errorClass : "Error";
+  const safeClass = typeof errorClass === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(errorClass) ? errorClass : "Error";
   console.error(JSON.stringify({ event: "identity_sign_in_failed", reference, stage, errorClass: safeClass }));
 };
 const signInFailure = (code, description, destination, origin) => {
@@ -75,8 +75,11 @@ const signInFailure = (code, description, destination, origin) => {
     server_error: ["Sign-in service error", "The identity provider could not complete the request. Retry in a moment. If it keeps happening, contact Onesa support.", 502],
     invalid_request: ["Sign-in request could not be validated", "The sign-in request is incomplete or expired. Return to the product and start sign-in again.", 400],
     invalid_grant: ["Sign-in could not be completed", "The authorization code expired or was already used. Start a fresh sign-in from the product.", 400],
+    mfa_required: ["Multi-factor authentication required", "Complete the multi-factor prompt to continue. If no prompt appears, restart sign-in and try again.", 403],
+    mfa_enrollment_needed: ["Authenticator setup required", "Set up the required authenticator for your Onesa account, then retry sign-in.", 403],
+    account_disabled: ["Onesa account disabled", "This Onesa account is disabled. Contact your Onesa administrator if you believe this is a mistake.", 403],
   };
-  const known = messages[code];
+  const known = Object.hasOwn(messages, code) ? messages[code] : null;
   if (known) {
     let detail = "";
     if (code === "access_denied" && /could not verify a fresh second factor/i.test(description || ""))
