@@ -102,6 +102,12 @@ test(
         receipt: "verified-" + id,
       }));
       applySnapshot(identity, "restore-fixture", snapshot, proofs, issuer);
+      const migratedDroneGrant = identity.one(
+        "SELECT role,status FROM grants WHERE id=? AND product='drone'",
+        drone,
+      );
+      assert.equal(migratedDroneGrant.role, "administrator");
+      assert.equal(migratedDroneGrant.status, "active");
       const change = (id, operation) =>
         identity.change(
           admin,
