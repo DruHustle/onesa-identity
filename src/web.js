@@ -33,26 +33,26 @@ const page = (title, body, status = 200, wide = false) =>
     <title>${esc(title)} · Onesa Account</title>
     <style>
       * { box-sizing: border-box; }
-      body { margin: 0; padding: 24px clamp(16px, 5vw, 64px) 48px; background: #f5f7fa; color: #10263e; font: 1rem/1.55 Arial, Helvetica, sans-serif; }
-      header { max-width: 68rem; margin: 0 auto 36px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
-      header > a { display: flex; align-items: center; gap: 10px; color: #10263e; font-weight: 600; text-decoration: none; }
-      header img { width: 32px; height: 32px; }
-      main { margin: auto; max-width: 38rem; padding: clamp(22px, 5vw, 36px); background: white; border: 1px solid #d4dce5; border-radius: 16px; overflow-wrap: anywhere; }
+      body { margin: 0; padding: 24px clamp(16px, 5vw, 64px) 48px; background: #F5F8F7; color: #172B4D; font: 1rem/1.55 Arial, Helvetica, sans-serif; }
+      header { max-width: 68rem; margin: 0 auto 28px; padding: 8px 0 18px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #D9E6E1; }
+      header > a { display: flex; align-items: center; gap: 11px; color: #102B29; font-weight: 700; letter-spacing: -.02em; text-decoration: none; }
+      header img { width: 36px; height: 36px; }
+      main { margin: auto; max-width: 38rem; padding: clamp(22px, 5vw, 36px); background: #FFFFFF; border: 1px solid #D9E6E1; border-top: 4px solid #00B894; border-radius: 18px; box-shadow: 0 16px 48px rgba(16, 43, 41, .08); overflow-wrap: anywhere; }
       main.wide { max-width: 68rem; }
-      h1 { margin: 0 0 16px; font-size: clamp(1.75rem, 5vw, 2.25rem); line-height: 1.12; letter-spacing: -.045em; }
+      h1 { margin: 0 0 16px; color: #102B29; font-size: clamp(1.75rem, 5vw, 2.25rem); line-height: 1.12; letter-spacing: -.045em; }
       h2 { margin: 1.5rem 0 .5rem; font-size: 1.25rem; }
       p { margin: 0 0 1rem; }
-      .muted { color: #56677b; }
-      article { margin: 1rem 0; padding: 1rem; border: 1px solid #d4dce5; border-radius: 6px; }
+      .muted { color: #526B69; }
+      article { margin: 1rem 0; padding: 1rem; border: 1px solid #D9E6E1; border-radius: 10px; background: #FBFDFC; }
       .actions, nav, .products li { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1.25rem; }
       .products { padding: 0; list-style: none; }
       .products li { justify-content: space-between; padding: .7rem 0; border-bottom: 1px solid #d4dce5; }
       label { display: inline-grid; max-width: 100%; margin: .3rem; gap: .2rem; }
-      a { color: #1a51ac; text-underline-offset: 3px; }
-      input, select, button, .primary { max-width: 100%; min-height: 44px; padding: .55rem .75rem; font: inherit; border: 1px solid #6e7d90; border-radius: 6px; background: white; color: #10263e; }
+      a { color: #087F68; text-underline-offset: 3px; }\n      a:hover { color: #065C4E; }
+      input, select, button, .primary { max-width: 100%; min-height: 44px; padding: .55rem .75rem; font: inherit; border: 1px solid #9AAEAA; border-radius: 10px; background: white; color: #172B4D; }
       button, .primary { cursor: pointer; }
-      .primary { display: inline-flex; align-items: center; background: #2366d1; border-color: #2366d1; color: white; text-decoration: none; }
-      :is(a, button, input, select):focus-visible { outline: 2px solid #2366d1; outline-offset: 3px; }
+      .primary { display: inline-flex; align-items: center; background: #0B725E; border-color: #0B725E; color: white; text-decoration: none; }\n      .primary:hover { background: #095C4D; border-color: #095C4D; }
+      :is(a, button, input, select):focus-visible { outline: 3px solid #00B894; outline-offset: 3px; }
     </style></head><body>
     <header><a href="/account"><img src="https://onesa.eu/brand/icons/v1/onesa-company-180.png" alt="" width="32" height="32">Onesa Account</a>
     <nav aria-label="Account"><a href="/account">My account</a><a href="/admin">Administration</a></nav></header>
