@@ -55,7 +55,8 @@ export function configuration(env) {
       !Object.hasOwn(products, resource.product) ||
       resource.product === "identity" ||
       (resource.sharedAdminRole !== undefined &&
-        (!configurableAdminRoles.has(resource.product) || resource.sharedAdminRole !== "admin")) ||
+        (!configurableAdminRoles.has(resource.product) ||
+          !["admin", "administrator"].includes(resource.sharedAdminRole))) ||
       !Array.isArray(resource.clients) ||
       !resource.clients.length ||
       resource.clients.some(

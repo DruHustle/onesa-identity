@@ -111,7 +111,13 @@ const retryPath = (destination, origin) => {
   }
   if (invite && /^[A-Za-z0-9_-]{43}$/.test(invite))
     return "/login?invite=" + encodeURIComponent(invite);
-  return target.pathname === "/admin" ? "/login?return=%2Fadmin" : "/login";
+  return target.pathname === "/admin"
+    ? "/login?return=" + encodeURIComponent(
+        "/admin" + (target.searchParams.has("product")
+          ? "?product=" + encodeURIComponent(target.searchParams.get("product"))
+          : ""),
+      )
+    : "/login";
 };
 const hidden = (key, value) =>
   '<input type="hidden" name="' + key + '" value="' + esc(value) + '">';
@@ -169,7 +175,8 @@ export function createApp(store, env, client = authClient(env)) {
   }
   const connectedProducts = new Set(Array.from(env.resources.values(), item => item.product));
   const adminEnabled = new Set(Array.from(env.resources.values())
-    .filter(resource => resource.sharedAdminRole === "admin").map(resource => resource.product));
+    .filter(resource => ["admin", "administrator"].includes(resource.sharedAdminRole))
+    .map(resource => resource.product));
   function productAccess(session) {
     const tiers = registrations(store.db, session.id);
     const decisions = new Map(store.all(
@@ -243,11 +250,15 @@ export function createApp(store, env, client = authClient(env)) {
       }
       if (actor.status !== "active") return new Response(null, { status: 403 });
       const explicit = store.one("SELECT role,status FROM grants WHERE id=? AND product=?", actor.id, product);
-      const role = explicit
+      const managedAdministrator = store.activeProductAdministrator(actor.id, product);
+      const assignedRole = explicit
         ? (explicit.status === "active" && explicit.role)
-        : sharedRole(product, registrations(store.db, actor.id), resource.sharedAdminRole === "admin");
+        : sharedRole(product, registrations(store.db, actor.id),
+          ["admin", "administrator"].includes(resource.sharedAdminRole));
+      const role = managedAdministrator ? "administrator" : assignedRole;
       if (!role || !products[product]?.includes(role) ||
-          (role === "admin" && configurableAdminRoles.has(product) && resource.sharedAdminRole !== "admin"))
+          (!managedAdministrator && role === "administrator" && configurableAdminRoles.has(product) &&
+            !["admin", "administrator"].includes(resource.sharedAdminRole)))
         return new Response(null, { status: 403 });
       return Response.json({
         user_id: actor.id,
@@ -257,7 +268,7 @@ export function createApp(store, env, client = authClient(env)) {
         // Every privileged role requires recent MFA, including explicit grants.
         // An explicit product grant must never downgrade the authentication
         // requirements of the identical role inherited through registration.
-        ...(["admin", "administrator", "owner"].includes(role)
+        ...(["administrator", "owner"].includes(role)
           ? { require_mfa: true } : {}),
       });
     }
@@ -282,9 +293,12 @@ export function createApp(store, env, client = authClient(env)) {
         state = oidc.randomState(),
         nonce = oidc.randomNonce(),
         verifier = oidc.randomPKCECodeVerifier();
-      let destination =
-        url.searchParams.get("return") === "/admin" || p === "/step-up"
-          ? "/admin"
+      const requestedReturn = url.searchParams.get("return") || (p === "/step-up" ? "/admin" : "/account");
+      const returnUrl = new URL(requestedReturn, env.origin);
+      const requestedProduct = returnUrl.searchParams.get("product") || "";
+      let destination = returnUrl.origin === env.origin && returnUrl.pathname === "/admin" &&
+        (!requestedProduct || Object.hasOwn(products, requestedProduct))
+          ? "/admin" + (requestedProduct ? "?product=" + encodeURIComponent(requestedProduct) : "")
           : "/account";
       const invitation = url.searchParams.get("invite");
       if (invitation && /^[\w-]{43}$/.test(invitation))
@@ -389,9 +403,9 @@ export function createApp(store, env, client = authClient(env)) {
         );
       const target = new URL(flow.destination, env.origin);
       const product = target.searchParams.get("product");
-      const destination = product && returns.get(returnKey(product, target.searchParams.get("platform"),
+      const destination = product && target.searchParams.has("enrollment") && returns.get(returnKey(product, target.searchParams.get("platform"),
         target.searchParams.get("enrollment")));
-      if (product && !destination)
+      if (product && target.searchParams.has("enrollment") && !destination)
         return page("Product registration unavailable", "The product return is no longer configured.", 503);
       const user = store.register(
         env.issuer,
@@ -438,7 +452,12 @@ export function createApp(store, env, client = authClient(env)) {
     if (p === "/" || p === "/account" || p === "/admin") {
       if (method !== "GET") return new Response(null, { status: 405 });
       if (!session) {
-        if (p === "/admin") return redirect("/login?return=/admin");
+        if (p === "/admin") {
+          const product = url.searchParams.get("product");
+          return redirect("/login?return=" + encodeURIComponent(
+            "/admin" + (product ? "?product=" + encodeURIComponent(product) : ""),
+          ));
+        }
         const invite = url.searchParams.get("invite");
         const suffix = invite && /^[\w-]{43}$/.test(invite) ? "?invite=" + encodeURIComponent(invite) : "";
         return page(
@@ -566,15 +585,55 @@ export function createApp(store, env, client = authClient(env)) {
     if (!["/admin", "/admin/change", "/admin/invite"].includes(p))
       return page("Page unavailable", "", 404);
     const identityGrant = session && store.activeGrant(session.id, "identity");
-    if (!session || identityGrant?.role !== "admin")
+    const scopeProduct = url.searchParams.get("product") || form?.get("product") || "";
+    if (scopeProduct && !Object.hasOwn(products, scopeProduct))
+      return page("Product unavailable", "", 404);
+    const scopedGrant = session && scopeProduct
+      ? store.activeGrant(session.id, scopeProduct)
+      : null;
+    const globalAdministrator = identityGrant?.role === "administrator";
+    const canManageProduct = Boolean(
+      scopedGrant && ["administrator", "owner"].includes(scopedGrant.role) ||
+      session && scopeProduct && store.activeProductAdministrator(session.id, scopeProduct),
+    );
+    if (!session || (scopeProduct ? !(globalAdministrator || canManageProduct) : !globalAdministrator))
       return page("Identity administrator required", "", 403);
     if (!session.mfa_at || Date.now() - session.mfa_at > 300000)
       return page(
         "Verify your identity",
-        '<a href="/step-up">Continue with fresh MFA</a>',
+        '<a href="/step-up?return=' + encodeURIComponent(scopeProduct
+          ? "/admin?product=" + scopeProduct
+          : "/admin") + '">Continue with fresh MFA</a>',
         403,
       );
     if (p === "/admin" && method === "GET") {
+      if (scopeProduct) {
+        const administrators = store.all(
+          "SELECT a.id,a.email,a.revision,a.status,CASE WHEN pa.status='active' THEN pa.status ELSE g.status END AS product_status,CASE WHEN pa.status='active' THEN 'Product administrator' ELSE 'Identity grant' END AS source FROM accounts a LEFT JOIN product_administrators pa ON pa.id=a.id AND pa.product=? AND pa.status='active' LEFT JOIN grants g ON g.id=a.id AND g.product=? AND g.role='administrator' AND g.status='active' WHERE a.status='active' AND (pa.id IS NOT NULL OR g.id IS NOT NULL) ORDER BY a.email",
+          scopeProduct,
+          scopeProduct,
+        );
+        const list = administrators.map((user) => {
+          const action = user.product_status === "active"
+            ? post("/admin/change", session.csrf,
+                hidden("kind", "product-administrator") + hidden("product", scopeProduct) +
+                hidden("id", user.id) + hidden("revision", user.revision) +
+                hidden("status", "revoked") + "<button>Remove administrator</button>")
+            : "<span>Managed by Identity</span>";
+          return "<li><strong>" + esc(user.email) + "</strong> · " + esc(user.source) + " " + action + "</li>";
+        }).join("");
+        const productName = accountProducts.get(scopeProduct)?.name || scopeProduct;
+        return page(
+          productName + " administrators",
+          "<p>Manage administrator access for " + esc(productName) + ". Only active, verified Onesa accounts can be added. Changes are recorded in the Identity audit log.</p>" +
+            "<ul>" + (list || "<li>No administrators assigned.</li>") + "</ul>" +
+            post("/admin/change", session.csrf,
+              hidden("kind", "product-administrator") + hidden("product", scopeProduct) + hidden("status", "active") +
+              '<label>Verified Onesa account email<input type="email" name="email" required autocomplete="off"></label>' +
+              '<button>Add administrator</button>') +
+            '<p><a href="/admin">Identity administration</a></p>',
+        );
+      }
       const users = store.all(
         "SELECT * FROM accounts ORDER BY email LIMIT 201",
       );
@@ -687,6 +746,29 @@ export function createApp(store, env, client = authClient(env)) {
       );
     }
     if (p === "/admin/change" && method === "POST") {
+      const scope = form.get("product") || "";
+      if (form.get("kind") === "product-administrator") {
+        let targetId = form.get("id");
+        let targetRevision = Number(form.get("revision"));
+        if (form.get("status") === "active") {
+          const email = String(form.get("email") || "").trim().toLowerCase();
+          const target = store.one(
+            "SELECT a.id,a.revision FROM accounts a JOIN links l ON l.id=a.id AND l.issuer=? WHERE a.email=? COLLATE NOCASE AND a.status='active' LIMIT 1",
+            env.issuer,
+            email,
+          );
+          if (!target)
+            throw new Rejected("Register and verify this address with Onesa first, then activate the account before granting administrator access.");
+          targetId = target.id;
+          targetRevision = target.revision;
+        }
+        store.change(session.id, targetId, targetRevision, {
+          kind: "product-administrator",
+          product: scope,
+          status: form.get("status"),
+        }, scope);
+        return redirect("/admin?product=" + encodeURIComponent(scope));
+      }
       const [product, role] = (form.get("assignment") || "").split("/");
       store.change(session.id, form.get("id"), Number(form.get("revision")), {
         kind: form.get("kind"),
@@ -694,8 +776,10 @@ export function createApp(store, env, client = authClient(env)) {
         product,
         role,
         status: form.get("status"),
-      });
-      return redirect("/admin?id=" + encodeURIComponent(form.get("id")));
+      }, scope || null);
+      return redirect(scope
+        ? "/admin?product=" + encodeURIComponent(scope)
+        : "/admin?id=" + encodeURIComponent(form.get("id")));
     }
     return new Response(null, { status: 405 });
   }

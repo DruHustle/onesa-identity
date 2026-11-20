@@ -10,9 +10,9 @@ function requireState(value, message) {
   if (!value) throw new Error(message);
 }
 const productRoles = {
-  ai: ["user", "admin"],
-  robot: ["viewer", "operator", "admin"],
-  drone: ["viewer", "operator", "admin"],
+  ai: ["user", "administrator"],
+  robot: ["viewer", "operator", "administrator"],
+  drone: ["viewer", "operator", "administrator"],
   farmer: ["user"],
   logistics: ["user"],
   factory: ["user"],
@@ -253,7 +253,7 @@ export function prepareLegacyRollback(
         report("legacy-engineering-suppressed-by-canonical-decision");
       // Tenant roles are local records. Legacy publishes them without applying a grant-role ceiling.
       const drone = index.get("drone"),
-        rank = ["viewer", "operator", "admin"];
+        rank = ["viewer", "operator", "administrator"];
       if (
         enabled &&
         snapshot.drone_memberships.some(

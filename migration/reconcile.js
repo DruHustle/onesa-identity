@@ -29,6 +29,7 @@ function captureBaseline(store) {
   const inventories = [
     ["account", store.all("SELECT * FROM accounts ORDER BY id"), (row) => row.id],
     ["grant", store.all("SELECT * FROM grants ORDER BY id,product"), (row) => row.id + "/" + row.product],
+    ["product-administrator", store.all("SELECT * FROM product_administrators ORDER BY id,product"), (row) => row.id + "/" + row.product],
     ["link", store.all("SELECT * FROM links ORDER BY issuer,subject"), (row) => digest(row.issuer + "\\0" + row.subject)],
   ];
   for (const [kind, rows, key] of inventories)
@@ -60,6 +61,12 @@ function verifyBaselineIntegrity(store, changedIds = new Set()) {
     {
       kind: "grant",
       rows: () => store.all("SELECT * FROM grants ORDER BY id,product"),
+      key: (row) => row.id + "/" + row.product,
+      owner: (row) => row.id,
+    },
+    {
+      kind: "product-administrator",
+      rows: () => store.all("SELECT * FROM product_administrators ORDER BY id,product"),
       key: (row) => row.id + "/" + row.product,
       owner: (row) => row.id,
     },
@@ -153,6 +160,9 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
       // address. Do not silently import ambiguous contact ownership or an
       // address that the live registration path would later refuse.
       const email = typeof u.email === "string" ? u.email.trim().toLowerCase() : "";
+      // Older Portal rows used "admin"; keep the grant while migrating to the
+      // canonical Onesa role name.
+      const portalRole = u.role === "admin" ? "administrator" : u.role;
       check(
         uuid(u.id) &&
           !ids.has(u.id) &&
@@ -163,7 +173,7 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         "Conflicting account snapshot",
       );
       check(
-        u.role === "member" || products.portal.includes(u.role),
+        portalRole === "member" || products.portal.includes(portalRole),
         "Unknown Portal role",
       );
       ids.add(u.id);
@@ -178,13 +188,13 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
           "INSERT INTO grants VALUES(?,?,?,?)",
           u.id,
           "portal",
-          u.role,
-          ["owner", "administrator"].includes(u.role) ? "pending" : "active",
+          portalRole,
+          ["owner", "administrator"].includes(portalRole) ? "pending" : "active",
         );
       // Old global-admin and implicit Farmer rights require an explicit resource-owner disposition.
-      if (u.role !== "member")
+      if (portalRole !== "member")
         pending.push({ kind: "legacy-implicit-access", id: u.id });
-      if (["owner", "administrator"].includes(u.role))
+      if (["owner", "administrator"].includes(portalRole))
         pending.push({ kind: "review-product-grant", id: u.id + "/portal" });
     }
     function grant(row) {
@@ -202,7 +212,13 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         row.status,
       );
     }
-    for (const g of snapshot.grants) {
+    for (const sourceGrant of snapshot.grants) {
+      // The canonical role changed from "admin" to "administrator". Normalize
+      // the imported row but retain the source snapshot verbatim for recovery.
+      const g =
+        sourceGrant?.role === "admin"
+          ? { ...sourceGrant, role: "administrator" }
+          : sourceGrant;
       if (
         (g.product === "pasofi" && g.role !== "customer") ||
         g.product === "internal-documents" ||
@@ -213,7 +229,7 @@ export function applySnapshot(store, key, snapshot, proofs, issuer) {
         pending.push({ kind: "review-product-grant", id: g.id + "/" + g.product });
       } else if (
         (g.product === "portal" && ["owner", "administrator"].includes(g.role)) ||
-        (configurableAdminRoles.has(g.product) && g.role === "admin")
+        (configurableAdminRoles.has(g.product) && g.role === "administrator")
       ) {
         // Legacy elevated roles need an independent decision before issuance.
         pending.push({ kind: "review-product-grant", id: g.id + "/" + g.product });
@@ -447,6 +463,15 @@ export function replayDelta(store, bundle) {
         );
         check(JSON.stringify(grants) === JSON.stringify(expectedGrants),
           "Recovery target has divergent grants");
+        const administrators = store.all(
+          "SELECT * FROM product_administrators WHERE id=? ORDER BY product",
+          x.account.id,
+        );
+        const expectedAdministrators = [...(x.product_administrators || [])].sort(
+          (a, b) => a.product.localeCompare(b.product),
+        );
+        check(JSON.stringify(administrators) === JSON.stringify(expectedAdministrators),
+          "Recovery target has divergent product administrators");
       }
       clearResolvedProofs(store);
       store.run("DELETE FROM sessions");
@@ -503,6 +528,22 @@ export function replayDelta(store, bundle) {
           g.status,
         );
       }
+      store.run("DELETE FROM product_administrators WHERE id=?", a.id);
+      for (const administrator of x.product_administrators || []) {
+        check(
+          administrator.id === a.id &&
+            Object.hasOwn(products, administrator.product) &&
+            administrator.status === "active",
+          "Invalid recovered product administrator",
+        );
+        store.run(
+          "INSERT INTO product_administrators(id,product,status,revision) VALUES(?,?,?,?)",
+          administrator.id,
+          administrator.product,
+          administrator.status,
+          administrator.revision,
+        );
+      }
     }
     // Initial replay must also detect extra or altered provider links left
     // behind by a restored database. Never keep unverified login ownership.
@@ -538,6 +579,7 @@ export function rollbackDelta(store, key) {
       account: store.one("SELECT * FROM accounts WHERE id=?", id),
       links: store.all("SELECT * FROM links WHERE id=?", id),
       grants: store.all("SELECT * FROM grants WHERE id=?", id),
+      product_administrators: store.all("SELECT * FROM product_administrators WHERE id=?", id),
     }));
     return {
       version: 2,
