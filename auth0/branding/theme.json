@@ -8,7 +8,7 @@
     "input_border_weight": 1,
     "widget_corner_radius": 18,
     "widget_border_weight": 1,
-    "show_widget_shadow": false
+    "show_widget_shadow": true
   },
   "colors": {
     "primary_button": "#0B725E",
