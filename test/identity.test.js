@@ -338,7 +338,7 @@ test("verification and expired login retry resume the original product across tw
   setRedeem(async () => ({ iss: env.issuer, sub: "oidc|pilot", email: "pilot@onesa.test", email_verified: true }));
   assert.equal((await signIn(drone)).headers.get("location"), registry.get("drone/web/user"));
   const resumed = await visit("/account/registration/resume?iss=" + encodeURIComponent(env.issuer));
-  assert.equal(resumed.headers.get("location"), "/login?audience=admin&product=farmer&platform=ios");
+  assert.equal(resumed.headers.get("location"), "/login?audience=admin&product=farmer&platform=ios&email_verification=continue");
   const newState = await start(resumed.headers.get("location"));
   store.run("UPDATE challenges SET expires=0 WHERE state=?", newState);
   const expired = await signIn(newState);

@@ -67,11 +67,8 @@ const logSignInFailure = (reference, stage, errorClass = "Error") => {
   console.error(JSON.stringify({ event: "identity_sign_in_failed", reference, stage, errorClass: safeClass }));
 };
 const verificationPage = (destination, env, outcome) => {
-  const retry = new URL(retryPath(destination, env.origin), env.origin);
-  retry.searchParams.set("email_verification", "continue");
-  const continueLink = '<a href="' + esc(retry.pathname + retry.search) + '">Continue sign-in</a>';
-  retry.searchParams.set("email_verification", "resend");
-  const resendLink = '<a class="primary" href="' + esc(retry.pathname + retry.search) + '">Resend verification email</a>';
+  const continueLink = '<a href="' + esc(verificationRetryPath(destination, env.origin)) + '">Continue sign-in</a>';
+  const resendLink = '<a class="primary" href="' + esc(verificationRetryPath(destination, env.origin, "resend")) + '">Resend verification email</a>';
   const copy = {
     required: ["Verify your email", "Open the verification email from Onesa Identity, then continue sign-in.", 403],
     accepted: ["Check your inbox", "The email provider accepted the request for a new verification email. Open it to verify your address, then continue sign-in.", 403],
@@ -148,6 +145,11 @@ const retryPath = (destination, origin) => {
           : ""),
       )
     : "/login";
+};
+const verificationRetryPath = (destination, origin, action = "continue") => {
+  const retry = new URL(retryPath(destination, origin), origin);
+  retry.searchParams.set("email_verification", action);
+  return retry.pathname + retry.search;
 };
 const hidden = (key, value) =>
   '<input type="hidden" name="' + key + '" value="' + esc(value) + '">';
@@ -360,11 +362,11 @@ export function createApp(store, env, client = authClient(env)) {
     }
     if (p === "/account/registration/resume" && method === "GET") {
       const resumes = browserResumes(req);
-      if (resumes.length === 1) return redirect(retryPath(resumes[0].destination, env.origin));
+      if (resumes.length === 1) return redirect(verificationRetryPath(resumes[0].destination, env.origin));
       if (resumes.length > 1) return page("Continue registration", "<ul>" + resumes.map(({ destination }) => {
         const target = new URL(destination, env.origin).searchParams;
         const label = accountProducts.get(target.get("product"))?.name + " · " + target.get("platform") + " · " + target.get("enrollment");
-        return '<li><a href="' + esc(retryPath(destination, env.origin)) + '">' + esc(label) + "</a></li>";
+        return '<li><a href="' + esc(verificationRetryPath(destination, env.origin)) + '">' + esc(label) + "</a></li>";
       }).join("") + "</ul>");
       return redirect("/account");
     }
@@ -418,7 +420,10 @@ export function createApp(store, env, client = authClient(env)) {
         code_challenge: await oidc.calculatePKCECodeChallenge(verifier),
         code_challenge_method: "S256",
       };
-      if (p === "/register") params.screen_hint = "signup";
+      if (p === "/register") {
+        params.screen_hint = "signup";
+        params.prompt = "login";
+      }
       const emailVerification = p === "/login" ? url.searchParams.get("email_verification") : null;
       if (emailVerification === "continue" || (emailVerification === "resend" && env.verification)) {
         params.prompt = "login";
