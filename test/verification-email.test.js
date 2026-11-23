@@ -149,6 +149,7 @@ test("fresh signup can recover a missing verification email and resume the origi
   assert.equal(signedIn.headers.get("location"), productReturn);
   assert.equal(cookies.has("__Host-onesa-session"), true);
   const registered = store.lookup(issuer, account.subject);
-  assert.equal(registered.status, "pending");
-  assert.equal(registrations(store.db, registered.id).get("user"), "pending");
+  assert.equal(registered.status, "active");
+  assert.equal(store.activeGrant(registered.id, "farmer").role, "user");
+  assert.equal(registrations(store.db, registered.id).size, 0);
 });

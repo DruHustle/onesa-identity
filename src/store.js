@@ -56,6 +56,17 @@ export function registrations(db, id) {
   }
   return result;
 }
+export function productAdministratorRequests(db, id) {
+  const rows = db.prepare(
+    "SELECT detail FROM audit WHERE target=? AND action='product-administrator-request' ORDER BY seq",
+  ).all(id);
+  const requests = new Map();
+  for (const row of rows) {
+    const { product, status } = JSON.parse(row.detail);
+    requests.set(product, status);
+  }
+  return requests;
+}
 export function sharedRole(product, tiers, adminRoleEnabled) {
   if (product === "portal") return tiers.get("admin") === "active" ? "administrator" : null;
   if (!sharedProducts.has(product)) return null;
@@ -230,6 +241,7 @@ export function openStore(path, { existingOnly = false } = {}) {
   `);
   verifyAuditChain();
   db.exec("CREATE INDEX IF NOT EXISTS audit_shared_registrations ON audit(target,seq) WHERE action='shared-registration'");
+  db.exec("CREATE INDEX IF NOT EXISTS audit_product_administrator_requests ON audit(target,seq) WHERE action='product-administrator-request'");
 
   const audit = (actor, action, id, detail = {}) => {
     const previousRow = one(
@@ -294,14 +306,61 @@ export function openStore(path, { existingOnly = false } = {}) {
     audit(id, "shared-registration", id, { tier, status: "pending" });
     if (existing) run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
   }
-  function requestRegistration(id, tier) {
+  function recordProductAdministratorRequest(id, product) {
+    if (productAdministratorRequests(db, id).has(product) ||
+        one("SELECT 1 FROM product_administrators WHERE id=? AND product=? AND status='active'", id, product) ||
+        one("SELECT 1 FROM grants WHERE id=? AND product=? AND role IN ('administrator','owner') AND status='active'", id, product))
+      return;
+    audit(id, "product-administrator-request", id, { product, status: "pending" });
+    run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
+  }
+  function canActivateForProduct(id, product) {
+    // An existing account can have dormant approvals from before this signup.
+    // Leave them subject to a separate account-level decision.
+    return !one("SELECT 1 FROM account_deletion_requests WHERE id=?", id) &&
+      !one("SELECT 1 FROM grants WHERE id=? AND status='active' AND (product<>? OR role<>?)",
+        id, product, accountProducts.get(product)?.role) &&
+      !one("SELECT 1 FROM product_administrators WHERE id=? AND status='active'", id) &&
+      ![...registrations(db, id).values()].includes("active");
+  }
+  function recordProductEnrollment(account, product, tier) {
+    check(accountProducts.has(product), "Product unavailable");
+    check(tier === "user" || tier === "admin", "Invalid registration type");
+    if (tier === "admin") {
+      recordProductAdministratorRequest(account.id, product);
+      return;
+    }
+    if (!sharedProducts.has(product)) {
+      recordAccessRequest(account.id, product);
+      return;
+    }
+    const { id } = account;
+    const { role } = accountProducts.get(product);
+    if (sharedRole(product, registrations(db, id), false) ||
+        one("SELECT 1 FROM product_administrators WHERE id=? AND product=? AND status='active'", id, product))
+      return;
+    const inserted = run(
+      "INSERT INTO grants(id,product,role,status) VALUES(?,?,?,'active') ON CONFLICT(id,product) DO NOTHING",
+      id, product, role,
+    );
+    if (!inserted.changes) return;
+    audit(id, "verified-product-enrollment", id, { product, role, status: "active" });
+    if (account.status === "pending" && canActivateForProduct(id, product)) {
+      run("UPDATE accounts SET status='active' WHERE id=?", id);
+      audit(id, "status", id, { kind: "status", status: "active" });
+    }
+    run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
+  }
+  function requestRegistration(id, tier, product = null) {
     return atomic(() => {
       const account = one("SELECT status FROM accounts WHERE id=?", id);
       check(["active", "pending"].includes(account?.status), "Account unavailable");
-      recordRequest(id, tier);
+      if (!product) return recordRequest(id, tier);
+      check(tier === "admin" && accountProducts.has(product), "Invalid administrator request");
+      recordProductAdministratorRequest(id, product);
     });
   }
-  function register(issuer, sub, email, invitation = "", tier) {
+  function register(issuer, sub, email, invitation = "", tier, product = null) {
     return atomic(() => {
       check(
         typeof email === "string" &&
@@ -329,7 +388,8 @@ export function openStore(path, { existingOnly = false } = {}) {
             issuer,
           });
         }
-        if (tier && ["active", "pending"].includes(linked.status)) recordRequest(linked.id, tier);
+        if (product) recordProductEnrollment(linked, product, tier);
+        else if (tier) recordRequest(linked.id, tier);
         return lookup(issuer, sub);
       }
       // A legacy address match demands separately verified immutable ownership.
@@ -364,7 +424,8 @@ export function openStore(path, { existingOnly = false } = {}) {
       audit(id, invite ? "accept-invitation" : "register", id, {
         status: "pending",
       });
-      if (tier !== undefined) recordRequest(id, tier ?? "user", false);
+      if (product) recordProductEnrollment({ id, status: "pending" }, product, tier);
+      else if (tier !== undefined) recordRequest(id, tier ?? "user", false);
       return lookup(issuer, sub);
     });
   }
@@ -400,25 +461,27 @@ export function openStore(path, { existingOnly = false } = {}) {
       return token;
     });
   }
+  function recordAccessRequest(id, product) {
+    const requested = accountProducts.get(product);
+    check(requested, "Product unavailable");
+    // A delayed form submission must not replace an approved shared entry.
+    if (sharedRole(product, registrations(db, id), false)) return;
+    // A canonical Documents record would supersede the existing Engineering decision.
+    if (product === "internal-documents" &&
+        one("SELECT 1 FROM grants WHERE id=? AND product='engineering-documents'", id)) return;
+    const inserted = run(
+      "INSERT INTO grants(id,product,role,status) VALUES(?,?,?,'pending') ON CONFLICT(id,product) DO NOTHING",
+      id, product, requested.role,
+    );
+    if (!inserted.changes) return;
+    run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
+    audit(id, "request-product-access", id, { product, role: requested.role });
+  }
   function requestAccess(id, product) {
     return atomic(() => {
-      const requested = accountProducts.get(product);
-      check(requested, "Product unavailable");
       const account = one("SELECT status FROM accounts WHERE id=?", id);
-      check(account && ["active", "pending"].includes(account.status), "Account unavailable");
-      // A delayed form submission must not replace already approved shared entry with a pending override.
-      if (sharedRole(product, registrations(db, id), false)) return;
-      // A canonical Documents record would supersede the existing Engineering decision.
-      if (product === "internal-documents" &&
-          one("SELECT 1 FROM grants WHERE id=? AND product='engineering-documents'", id)) return;
-      const inserted = run(
-        "INSERT INTO grants(id,product,role,status) VALUES(?,?,?,'pending') ON CONFLICT(id,product) DO NOTHING",
-        id, product, requested.role,
-      );
-      if (inserted.changes) {
-        run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
-        audit(id, "request-product-access", id, { product, role: requested.role });
-      }
+      check(["active", "pending"].includes(account?.status), "Account unavailable");
+      recordAccessRequest(id, product);
     });
   }
   // A requested closure immediately removes central access, while each
@@ -445,6 +508,10 @@ export function openStore(path, { existingOnly = false } = {}) {
         if (status === "active" || status === "pending")
           audit(id, "shared-registration", id, { tier, status: "revoked" });
       }
+      for (const [product, status] of productAdministratorRequests(db, id)) {
+        if (status === "active" || status === "pending")
+          audit(id, "product-administrator-request", id, { product, status: "revoked" });
+      }
       run("UPDATE grants SET status='revoked' WHERE id=? AND status IN ('active','pending')", id);
       run("UPDATE accounts SET status='suspended',revision=revision+1 WHERE id=?", id);
       run("DELETE FROM sessions WHERE id=?", id);
@@ -460,18 +527,42 @@ export function openStore(path, { existingOnly = false } = {}) {
         "Account changed; reload before editing",
       );
       if (scopeProduct) {
+        const review = operation.kind === "product-administrator-review";
         check(Object.hasOwn(products, scopeProduct), "Product unavailable");
         check(
-          operation.kind === "product-administrator" && operation.product === scopeProduct,
+          (review || operation.kind === "product-administrator") && operation.product === scopeProduct,
           "Product administrators may only manage their own administrator list",
         );
         check(actor !== id, "Ask another product administrator to change your own access");
-        check(current.status === "active", "Administrator access requires an active Onesa account");
         check(one("SELECT 1 FROM links WHERE id=? LIMIT 1", id), "A verified Onesa account is required");
-        check(["active", "revoked"].includes(operation.status), "Invalid administrator state");
+        const request = productAdministratorRequests(db, id).get(scopeProduct);
+        if (review) {
+          check(request === "pending" && ["active", "rejected"].includes(operation.status),
+            "The request has changed. Reload before reviewing.");
+          check(["active", "pending"].includes(current.status), "Account unavailable");
+          if (operation.status === "rejected") {
+            audit(actor, "product-administrator-request", id, { product: scopeProduct, status: "rejected" });
+            run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
+            return;
+          }
+          if (current.status === "pending") {
+            check(canActivateForProduct(id, scopeProduct), "Ask an Identity administrator to review this account before approving product access");
+            run("UPDATE accounts SET status='active' WHERE id=?", id);
+            audit(actor, "status", id, { kind: "status", status: "active" });
+          }
+        } else {
+          check(current.status === "active", "Administrator access requires an active Onesa account");
+          check(["active", "revoked"].includes(operation.status), "Invalid administrator state");
+        }
         if (operation.status === "revoked") {
           const remaining = one(
-            "SELECT (SELECT count(*) FROM product_administrators JOIN accounts USING(id) WHERE product=? AND product_administrators.status='active' AND accounts.status='active') + (SELECT count(*) FROM grants JOIN accounts USING(id) WHERE product=? AND role='administrator' AND grants.status='active' AND accounts.status='active') AS n",
+            `SELECT count(*) AS n FROM (
+              SELECT id FROM product_administrators JOIN accounts USING(id)
+                WHERE product=? AND product_administrators.status='active' AND accounts.status='active'
+              UNION
+              SELECT id FROM grants JOIN accounts USING(id)
+                WHERE product=? AND role='administrator' AND grants.status='active' AND accounts.status='active'
+            )`,
             scopeProduct,
             scopeProduct,
           ).n;
@@ -482,13 +573,14 @@ export function openStore(path, { existingOnly = false } = {}) {
           id,
           scopeProduct,
         );
-        if (operation.status === "revoked" && explicitAdministrator) {
+        if (operation.status === "revoked") {
           run(
             "UPDATE grants SET status='revoked' WHERE id=? AND product=? AND role='administrator' AND status='active'",
             id,
             scopeProduct,
           );
-        } else {
+          run("UPDATE product_administrators SET status='revoked',revision=revision+1 WHERE id=? AND product=? AND status='active'", id, scopeProduct);
+        } else if (!explicitAdministrator) {
           run(
             "INSERT INTO product_administrators(id,product,status) VALUES(?,?,?) ON CONFLICT(id,product) DO UPDATE SET status=excluded.status,revision=product_administrators.revision+1",
             id,
@@ -497,6 +589,8 @@ export function openStore(path, { existingOnly = false } = {}) {
           );
         }
         run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
+        if (request)
+          audit(actor, "product-administrator-request", id, { product: scopeProduct, status: operation.status });
         audit(actor, operation.status === "active" ? "administrator-grant" : "administrator-revoke", id, {
           product: scopeProduct,
           role: "administrator",
