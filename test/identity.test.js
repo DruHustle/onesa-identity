@@ -1479,6 +1479,32 @@ test("provider cancellation retry preserves invitation and restricts return dest
   assert.ok((await denied.text()).includes('href="/login"'));
 });
 
+test("Account revokes the local session before the optional Auth0 sign-out handoff", async (t) => {
+  for (const auth0LogoutEnabled of [false, true]) {
+    const { call, login } = await fixture(t, { auth0LogoutEnabled });
+    const member = await login("logout-test", "/account");
+    const headers = { cookie: member.cookie, origin: env.origin };
+    const account = await (await call("/account", "GET", undefined, headers)).text();
+    const csrf = account.match(/name="csrf" value="([^"]+)"/)[1];
+    const denied = await call("/logout", "POST", new URLSearchParams({ csrf: "invalid" }), headers);
+    assert.equal(denied.status, 403);
+    const logout = await call("/logout", "POST", new URLSearchParams({ csrf }), headers);
+    assert.equal(logout.status, 303);
+    assert.equal(logout.headers.getSetCookie().filter(value => value.includes("Max-Age=0")).length, 2);
+    if (auth0LogoutEnabled) {
+      const destination = new URL(logout.headers.get("location"));
+      assert.equal(destination.origin + destination.pathname, env.issuer + "oidc/logout");
+      assert.deepEqual(Object.fromEntries(destination.searchParams), {
+        client_id: env.clientId, post_logout_redirect_uri: env.origin,
+      });
+    } else {
+      assert.equal(logout.headers.get("location"), "/account");
+    }
+    const replay = await (await call("/account", "GET", undefined, headers)).text();
+    assert.match(replay, /<h1>Sign in to Onesa<\/h1>/);
+  }
+});
+
 test("a stale tab does not consume the current browser's sign-in challenge", async (t) => {
   const { call } = await fixture(t);
   const first = await call("/login");

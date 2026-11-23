@@ -84,6 +84,7 @@ export function configuration(env) {
     registrationReturns: registrationReturns(origin.origin, env.REGISTRATION_RETURNS_JSON),
     policyKey,
     connection: env.AUTH0_DATABASE_CONNECTION,
+    auth0LogoutEnabled: env.AUTH0_LOGOUT_ENABLED === "true",
   };
 }
 

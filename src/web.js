@@ -505,7 +505,7 @@ export function createApp(store, env, client = authClient(env)) {
             post("/account/delete", session.csrf,
               '<label>Type DELETE to confirm <input name="confirm" required autocomplete="off" spellcheck="false"></label>' +
               '<button>Request account closure</button>') +
-            post("/logout", session.csrf, "<button>Sign out here</button>"),
+            post("/logout", session.csrf, env.auth0LogoutEnabled ? "<button>Sign out</button>" : "<button>Sign out here</button>"),
         );
     }
     let form;
@@ -591,9 +591,18 @@ export function createApp(store, env, client = authClient(env)) {
         );
       }
       if (p === "/logout") {
-        store.run("DELETE FROM sessions WHERE hash=?", session.hash);
-        store.run("DELETE FROM registration_resumes WHERE hash=?", digest(readCookie(req, "registration")));
-        return redirect("/account", [cookie("session", "", 0), cookie("registration", "", 0)]);
+        store.atomic(() => {
+          store.run("DELETE FROM sessions WHERE hash=?", session.hash);
+          store.run("DELETE FROM registration_resumes WHERE hash=?", digest(readCookie(req, "registration")));
+        });
+        const expiredCookies = [cookie("session", "", 0), cookie("registration", "", 0)];
+        if (!env.auth0LogoutEnabled) return redirect("/account", expiredCookies);
+        const provider = new URL("oidc/logout", env.issuer);
+        provider.search = new URLSearchParams({
+          client_id: env.clientId,
+          post_logout_redirect_uri: env.origin,
+        });
+        return redirect(provider.href, expiredCookies);
       }
     }
     if (!["/admin", "/admin/change", "/admin/invite"].includes(p))
