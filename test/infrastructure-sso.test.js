@@ -5,6 +5,7 @@ import issuance from "../auth0/post-login.cjs";
 
 const ns = "https://onesa.eu/claims/";
 const clientId = "onesa-infrastructure-oidc-client";
+const portainerClientId = "onesa-portainer-owner-oidc-client";
 const audience = "https://api.portal.onesa.test";
 const allowed = { user_id: "c9228273-0b80-4fa9-bdbd-41abf2d14f26", product: "portal", roles: ["administrator"] };
 
@@ -145,4 +146,67 @@ test("policy outage does not admit infrastructure administrators", async t => {
   await issuance.onExecutePostLogin(f.event, f.api);
   assert.equal(f.denials.length, 2);
   assert.equal(f.claims[ns + "infrastructure_admin"], undefined);
+});
+
+function portainerFixture() {
+  const f = fixture();
+  f.event.client.client_id = portainerClientId;
+  f.event.secrets.PORTAINER_SSO_CLIENT_ID = portainerClientId;
+  f.event.secrets.PORTAINER_SSO_OWNER_SUB = f.event.user.user_id;
+  return f;
+}
+
+test("the registered Portainer owner uses recent MFA without Access or product claims", async t => {
+  const requests = [];
+  t.mock.method(globalThis, "fetch", async (_url, init) => {
+    requests.push(JSON.parse(init.body));
+    return Response.json({ ...allowed, roles: ["owner"] });
+  });
+  const f = portainerFixture();
+  await stepUp.onExecutePostLogin(f.event, f.api);
+  assert.deepEqual(f.challenges, [[{ type: "otp" }]]);
+  recentMfa(f, -3000);
+  await issuance.onExecutePostLogin(f.event, f.api);
+  assert.deepEqual(f.denials, []);
+  assert.deepEqual(f.claims, {});
+  assert.deepEqual(f.accessClaims, {});
+  assert.deepEqual(requests, Array.from({ length: 2 }, () => ({
+    subject: f.event.user.user_id, audience, client: portainerClientId,
+  })));
+});
+
+test("Portainer refuses another principal, a shared Access client or an API audience", async t => {
+  const policy = t.mock.method(globalThis, "fetch", async () => Response.json(allowed));
+  for (const change of [
+    event => { event.user.user_id = "auth0|other-administrator"; },
+    event => { delete event.secrets.PORTAINER_SSO_OWNER_SUB; },
+    event => { event.secrets.INFRASTRUCTURE_SSO_CLIENT_ID = portainerClientId; },
+    event => { event.resource_server = { identifier: audience }; },
+  ]) {
+    const f = portainerFixture();
+    change(f.event);
+    await stepUp.onExecutePostLogin(f.event, f.api);
+    recentMfa(f, -2000);
+    await issuance.onExecutePostLogin(f.event, f.api);
+    assert.equal(f.denials.length, 2);
+    assert.deepEqual(f.claims, {});
+    assert.deepEqual(f.accessClaims, {});
+  }
+  assert.equal(policy.mock.callCount(), 0);
+});
+
+test("a remembered session cannot admit a revoked Portainer owner or stale MFA", async t => {
+  let decision = allowed;
+  t.mock.method(globalThis, "fetch", async () => Response.json(decision));
+  const stale = portainerFixture();
+  recentMfa(stale, -301000);
+  await issuance.onExecutePostLogin(stale.event, stale.api);
+  assert.equal(stale.denials.length, 1);
+  const revoked = portainerFixture();
+  recentMfa(revoked, -3000);
+  decision = { ...allowed, roles: ["viewer"] };
+  await issuance.onExecutePostLogin(revoked.event, revoked.api);
+  assert.equal(revoked.denials.length, 1);
+  assert.deepEqual(revoked.claims, {});
+  assert.deepEqual(revoked.accessClaims, {});
 });

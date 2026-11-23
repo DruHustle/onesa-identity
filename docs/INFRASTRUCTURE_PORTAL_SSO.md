@@ -63,6 +63,30 @@ unprotected Kubernetes or management port.
    does not automatically revoke already issued Cloudflare Access cookies;
    use Access session revocation on urgent removal.
 
+## Portainer application sign-in
+
+Portainer uses a separate confidential Regular Web Application with its exact
+HTTPS callback. Keep it on the same canonical Onesa issuer and owner login
+connection as Cloudflare Access so both applications can reuse the Auth0 session.
+Allow Authorization Code and only the scopes needed for OIDC UserInfo. Configure
+neither a product API audience nor refresh tokens on the Portainer client.
+
+Register that client under the existing Portal resource in `RESOURCE_CLIENTS_JSON`.
+Set `PORTAINER_SSO_CLIENT_ID` and `PORTAINER_SSO_OWNER_SUB` in both Actions. Use
+the owner’s verified Auth0 subject and the existing `INFRASTRUCTURE_SSO_AUDIENCE`.
+The Actions require the exact owner subject, an active Portal administrator or
+owner grant, verified email, and recent MFA. Portainer receives the standard OIDC
+profile. Infrastructure and product access claims stay with their respective
+clients.
+
+Pre-provision the verified owner in Portainer and leave automatic user, team,
+and admin provisioning disabled. Verify the original administrator can still
+reach Portainer through the private management route before choosing OAuth.
+Keep the existing Access recovery path until the owner passes the complete
+Onesa and Portainer sign-in in a fresh browser, and ordinary accounts are denied.
+On rollback, restore Internal authentication using the original administrator,
+then restore the previous Access configuration if it changed.
+
 ## Launch acceptance
 
 Test on a fresh browser without existing Access cookies, before cutover:
