@@ -99,7 +99,7 @@ const redirect = (url, cookies = []) => {
   for (const c of cookies) headers.append("set-cookie", c);
   return new Response(null, { status: 303, headers });
 };
-const accountSections = new Set(["#product-access", "#account-security"]);
+const accountSections = new Set(["#product-access", "#account-security", "#account-closure"]);
 const retryPath = (destination, origin) => {
   const target = new URL(destination, origin);
   const invite = target.searchParams.get("invite");
@@ -455,6 +455,10 @@ export function createApp(store, env, client = authClient(env)) {
       digest(readCookie(req, "session")),
       Date.now(),
     );
+    if (p === "/account/closure" && method === "GET") {
+      const destination = "/account#account-closure";
+      return redirect(session ? destination : "/login?return=" + encodeURIComponent(destination));
+    }
     if (p === "/" || p === "/account" || p === "/admin") {
       if (method !== "GET") return new Response(null, { status: 405 });
       if (!session) {
@@ -500,7 +504,7 @@ export function createApp(store, env, client = authClient(env)) {
                   "<button>Send password reset email</button>",
                 )
               : "<p>Use Forgot password on the sign-in screen to recover your password.</p>") +
-            '<h2>Account closure</h2>' +
+            '<h2 id="account-closure">Account closure</h2>' +
             '<p>Request closure of your Onesa account. This immediately suspends central access and queues credential and product-data cleanup. Completion of downstream erasure is separately verified; applicable legal retention still applies.</p>' +
             post("/account/delete", session.csrf,
               '<label>Type DELETE to confirm <input name="confirm" required autocomplete="off" spellcheck="false"></label>' +
@@ -533,7 +537,7 @@ export function createApp(store, env, client = authClient(env)) {
             session.mfa_at > Date.now())
           return page("Verify your identity",
             '<p>Recent multi-factor verification is required before closing your account.</p>' +
-            '<a href="/verify-factor">Verify a second factor</a>', 403);
+            '<a href="/verify-factor?return=%2Faccount%23account-closure">Verify a second factor</a>', 403);
         store.requestDeletion(session.id);
         const result = page("Account closure requested",
           "<p>Your Onesa account access has been suspended. Your request is recorded for credential-provider and product-data cleanup. Some records may be retained where required by law. The request is not yet confirmation of complete erasure.</p>");
