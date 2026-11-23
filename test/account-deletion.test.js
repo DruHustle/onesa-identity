@@ -49,6 +49,24 @@ async function fixture(t, mfaAt = Date.now()) {
   return { store, account, call, cookie, csrf, request, html };
 }
 
+test("the product link opens account closure after sign-in without requesting deletion", async t => {
+  const f = await fixture(t);
+  const entry = await f.call("/account/closure");
+  assert.equal(entry.status, 303);
+  assert.equal(new URL(entry.headers.get("location"), origin).searchParams.get("return"), "/account#account-closure");
+
+  const start = await f.call(entry.headers.get("location"));
+  const state = new URL(start.headers.get("location")).searchParams.get("state");
+  const flow = start.headers.getSetCookie()[0].split(";")[0];
+  const complete = await f.call("/callback?code=fixture&state=" + state,
+    "GET", undefined, { cookie: flow });
+  assert.equal(complete.headers.get("location"), "/account#account-closure");
+  const signedIn = await f.call("/account/closure", "GET", undefined, { cookie: f.cookie });
+  assert.equal(signedIn.headers.get("location"), "/account#account-closure");
+  assert.match(f.html, /<h2 id="account-closure">Account closure<\/h2>/);
+  assert.equal(f.store.one("SELECT count(*) AS n FROM account_deletion_requests").n, 0);
+});
+
 test("account closure is MFA and CSRF protected, revokes sessions/grants and queues scoped cleanup", async t => {
   const f = await fixture(t);
   assert.match(f.html, /Request account closure/);
@@ -89,7 +107,9 @@ test("stale MFA cannot close the account or revoke grants", async t => {
   const f = await fixture(t, Date.now() - 600000);
   const attempted = await f.request();
   assert.equal(attempted.status, 403);
-  assert.match(await attempted.text(), /Recent multi-factor verification/);
+  const body = await attempted.text();
+  assert.match(body, /Recent multi-factor verification/);
+  assert.match(body, /\/verify-factor\?return=%2Faccount%23account-closure/);
   assert.equal(f.store.lookup(issuer, "oidc|closure-member").status, "active");
   assert.equal(f.store.one("SELECT count(*) AS n FROM account_deletion_requests").n, 0);
 });
