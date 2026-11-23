@@ -1,16 +1,21 @@
 // Bind immediately before post-login.cjs so the policy Action observes the completed challenge.
 /**
- * Cloudflare Access uses a dedicated Auth0 client. Only that exact, explicitly
- * registered client may request an infrastructure assertion; unrelated clients
- * retain their normal resource audience and never receive the claim.
+ * Infrastructure applications authorize against the existing Portal resource.
+ * Cloudflare Access and the Portainer owner client have independent bindings.
  */
 function infrastructureAudience(event) {
   const secrets = event.secrets || {};
-  const id = secrets.INFRASTRUCTURE_SSO_CLIENT_ID;
-  if (!id || event.client?.client_id !== id)
+  const id = event.client?.client_id;
+  const access = Boolean(id && id === secrets.INFRASTRUCTURE_SSO_CLIENT_ID);
+  const portainer = Boolean(id && id === secrets.PORTAINER_SSO_CLIENT_ID);
+  if (!access && !portainer)
     return { infrastructure: false, audience: event.resource_server?.identifier || "" };
   if (typeof id !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(id))
     throw Error("Invalid infrastructure client binding");
+  if (portainer && (access || !secrets.PORTAINER_SSO_OWNER_SUB ||
+      event.user?.user_id !== secrets.PORTAINER_SSO_OWNER_SUB ||
+      event.resource_server?.identifier))
+    throw Error("Invalid Portainer owner binding");
   const value = secrets.INFRASTRUCTURE_SSO_AUDIENCE;
   const url = new URL(value);
   if (url.protocol !== "https:" || value !== url.origin ||

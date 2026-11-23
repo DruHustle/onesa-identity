@@ -1,23 +1,28 @@
 // Install in a dedicated Onesa Auth0 tenant, including refresh-token exchanges.
 /**
- * Cloudflare Access uses a dedicated Auth0 client. Only that exact, explicitly
- * registered client may request an infrastructure assertion; unrelated clients
- * retain their normal resource audience and never receive the claim.
+ * Infrastructure applications authorize against the existing Portal resource.
+ * Cloudflare Access and the Portainer owner client have independent bindings.
  */
 function infrastructureAudience(event) {
   const secrets = event.secrets || {};
-  const id = secrets.INFRASTRUCTURE_SSO_CLIENT_ID;
-  if (!id || event.client?.client_id !== id)
+  const id = event.client?.client_id;
+  const access = Boolean(id && id === secrets.INFRASTRUCTURE_SSO_CLIENT_ID);
+  const portainer = Boolean(id && id === secrets.PORTAINER_SSO_CLIENT_ID);
+  if (!access && !portainer)
     return { infrastructure: false, audience: event.resource_server?.identifier || "" };
   if (typeof id !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(id))
     throw Error("Invalid infrastructure client binding");
+  if (portainer && (access || !secrets.PORTAINER_SSO_OWNER_SUB ||
+      event.user?.user_id !== secrets.PORTAINER_SSO_OWNER_SUB ||
+      event.resource_server?.identifier))
+    throw Error("Invalid Portainer owner binding");
   const value = secrets.INFRASTRUCTURE_SSO_AUDIENCE;
   const url = new URL(value);
   if (url.protocol !== "https:" || value !== url.origin ||
       url.username || url.password || url.search || url.hash ||
       (event.resource_server?.identifier && event.resource_server.identifier !== value))
     throw Error("Invalid infrastructure audience");
-  return { infrastructure: true, audience: value };
+  return { infrastructure: true, portainer, audience: value };
 }
 
 // POLICY_URL and POLICY_KEY belong in the Action secret store.
@@ -34,6 +39,7 @@ exports.onExecutePostLogin = async (event, api) => {
     return deny();
   let decision;
   let infrastructure = false;
+  let portainer = false;
   try {
     const url = new URL(POLICY_URL);
     const origin = new URL(POLICY_ORIGIN);
@@ -57,6 +63,7 @@ exports.onExecutePostLogin = async (event, api) => {
       return deny();
     const audience = infrastructureAudience(event);
     infrastructure = audience.infrastructure;
+    portainer = audience.portainer === true;
     const result = await fetch(url, {
       method: "POST",
       redirect: "error",
@@ -114,6 +121,8 @@ exports.onExecutePostLogin = async (event, api) => {
   }
   if (!decision.user_id || !decision.product || !Array.isArray(decision.roles))
     return deny();
+  // Portainer uses standard UserInfo for its separately provisioned owner.
+  if (portainer) return;
   // Cloudflare evaluates this signed ID-token claim; email or a normal Portal
   // session is never sufficient. No implicit grant or self-service decision.
   if (infrastructure) {
