@@ -17,6 +17,7 @@ services:
       OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
       ACTION_POLICY_KEY_FILE: /run/secrets/action_policy_key
       AUTH0_DATABASE_CONNECTION: "${AUTH0_DATABASE_CONNECTION:-}"
+      AUTH0_LOGOUT_ENABLED: "${AUTH0_LOGOUT_ENABLED:-false}"
       RESOURCE_CLIENTS_JSON: "${RESOURCE_CLIENTS_JSON:?Set the reviewed product audience and client registry}"
       REGISTRATION_RETURNS_JSON: "${REGISTRATION_RETURNS_JSON:-}"
       IDENTITY_DATABASE: /data/identity.sqlite
