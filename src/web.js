@@ -99,6 +99,7 @@ const redirect = (url, cookies = []) => {
   for (const c of cookies) headers.append("set-cookie", c);
   return new Response(null, { status: 303, headers });
 };
+const accountSections = new Set(["#product-access", "#account-security"]);
 const retryPath = (destination, origin) => {
   const target = new URL(destination, origin);
   const invite = target.searchParams.get("invite");
@@ -111,6 +112,8 @@ const retryPath = (destination, origin) => {
   }
   if (invite && /^[A-Za-z0-9_-]{43}$/.test(invite))
     return "/login?invite=" + encodeURIComponent(invite);
+  if (target.pathname === "/account" && accountSections.has(target.hash))
+    return "/login?return=" + encodeURIComponent("/account" + target.hash);
   return target.pathname === "/admin"
     ? "/login?return=" + encodeURIComponent(
         "/admin" + (target.searchParams.has("product")
@@ -201,7 +204,8 @@ export function createApp(store, env, client = authClient(env)) {
       }
       rows.push("<li><strong>" + esc(label) + "</strong>" + control + "</li>");
     }
-    return rows.length ? '<h2>Product access</h2><ul class="products">' + rows.join("") + '</ul>' : '';
+    return '<h2 id="product-access">Product access</h2>' +
+      (rows.length ? '<ul class="products">' + rows.join("") + '</ul>' : '<p>No products are available to request yet.</p>');
   }
   function registrationPanel(session) {
     const states = registrations(store.db, session.id);
@@ -300,6 +304,8 @@ export function createApp(store, env, client = authClient(env)) {
         (!requestedProduct || Object.hasOwn(products, requestedProduct))
           ? "/admin" + (requestedProduct ? "?product=" + encodeURIComponent(requestedProduct) : "")
           : "/account";
+      if (returnUrl.origin === env.origin && returnUrl.pathname === "/account" && accountSections.has(returnUrl.hash))
+        destination += returnUrl.hash;
       const invitation = url.searchParams.get("invite");
       if (invitation && /^[\w-]{43}$/.test(invitation))
         destination = "/account?invite=" + invitation;
@@ -442,7 +448,7 @@ export function createApp(store, env, client = authClient(env)) {
         cookies.push(cookie("flow-" + state, "", 0));
         if (consumed.changes && !browserResumes(req).length) cookies.push(cookie("registration", "", 0));
       }
-      return redirect(destination || (target.pathname + target.search), cookies);
+      return redirect(destination || (target.pathname + target.search + target.hash), cookies);
     }
     const session = store.one(
       "SELECT s.*,a.email,a.status AS state FROM sessions s JOIN accounts a USING(id) WHERE hash=? AND expires>? AND a.status IN ('active','pending')",
@@ -460,12 +466,20 @@ export function createApp(store, env, client = authClient(env)) {
         }
         const invite = url.searchParams.get("invite");
         const suffix = invite && /^[\w-]{43}$/.test(invite) ? "?invite=" + encodeURIComponent(invite) : "";
+        const featureSignIn = (section) => suffix ? "/login" + suffix : "/login?return=" + encodeURIComponent("/account" + section);
         return page(
           "Sign in to Onesa",
-          '<p class="muted">Use your existing Onesa account to access your approved products.</p>' +
+          '<p class="muted">Use one Onesa account across your approved products. Create an account, verify your email, and request access to the products you need.</p>' +
           '<div class="actions"><a class="primary" href="/login' + suffix + '">Sign in to Onesa</a>' +
           '<a href="/register' + suffix + '">Create an Onesa account</a>' +
-          '<a href="/register?audience=admin' + (suffix ? '&amp;' + suffix.slice(1) : '') + '">Request administrator registration</a></div>',
+          '<a href="/register?audience=admin' + (suffix ? '&amp;' + suffix.slice(1) : '') + '">Request administrator registration</a></div>' +
+          '<section aria-labelledby="access-overview"><h2 id="access-overview">Product access</h2>' +
+          '<p>Check your access and request approval for another product. For example, a Smart Farmer request can show “Awaiting approval” while an administrator reviews it.</p>' +
+          '<p>' + Array.from(accountProducts.values(), ({ name }) => esc(name)).join(" · ") + '</p>' +
+          '<a href="' + featureSignIn("#product-access") + '">Sign in to manage product access</a></section>' +
+          '<section aria-labelledby="security-overview"><h2 id="security-overview">Account security</h2>' +
+          '<p>Set up or verify a second sign-in factor and find password recovery options.</p>' +
+          '<a href="' + featureSignIn("#account-security") + '">Sign in to manage account security</a></section>',
         );
       }
       if (p !== "/admin")
@@ -478,7 +492,7 @@ export function createApp(store, env, client = authClient(env)) {
             '</p>' +
             (session.state === "pending" ? '<p>Your account is awaiting administrator approval.</p>' : '') +
             registrationPanel(session) + productAccess(session) +
-            '<h2>Account security</h2><p><a href="/verify-factor">Verify or enroll a second factor</a></p>' +
+            '<h2 id="account-security">Account security</h2><p><a href="/verify-factor">Verify or enroll a second factor</a></p>' +
             (env.connection
               ? post(
                   "/account/recovery",

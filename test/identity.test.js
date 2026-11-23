@@ -239,6 +239,29 @@ test("the Onesa Account entry preserves invitations for sign-in and registration
   }
 });
 
+test("the public Account overview returns a signed-in visitor to the selected feature", async (t) => {
+  const { call, login } = await fixture(t);
+  for (const path of ["/", "/account"]) {
+    const overview = await call(path);
+    const html = await overview.text();
+    assert.equal(overview.status, 200);
+    assert.equal(overview.headers.get("cache-control"), "no-store");
+    assert.equal(overview.headers.has("set-cookie"), false);
+    assert.match(html, /Company Portal.*Smart Farmer.*PasoFi/);
+    assert.doesNotMatch(html, /<form|identity-admin@onesa\.test/);
+    for (const section of ["product-access", "account-security"]) {
+      const returnPath = "/account#" + section;
+      assert.ok(html.includes('href="/login?return=' + encodeURIComponent(returnPath) + '"'));
+      const member = await login("overview-member", returnPath);
+      assert.equal(member.url, returnPath);
+      const account = await call("/account", "GET", undefined, { cookie: member.cookie });
+      assert.match(await account.text(), new RegExp('<h2 id="' + section + '">'));
+    }
+  }
+  assert.equal((await login("overview-member", "/account#unrecognized")).url, "/account");
+  assert.equal((await login("overview-member", "https://example.test/account#account-security")).url, "/account");
+});
+
 test("both registration types return to each registered product and platform without transferring Identity credentials", async t => {
   const registry = registrationReturns("https://auth.onesa.eu");
   // Production Account and the Auth0 provider may use different origins.
