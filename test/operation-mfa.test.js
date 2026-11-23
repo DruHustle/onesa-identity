@@ -170,12 +170,45 @@ test("normal shared-admin login without an ACR challenges before issuing the app
   assert.deepEqual(normal.claims[ns + "roles"], ["user"]);
 });
 
-test("hosted signup is accepted only for the Identity Account client", async () => {
+test("hosted signup requires Auth0's Account client or its exclusively registered code callback", async (t) => {
   const { default: action } = await import("../auth0/pre-registration.cjs");
-  for (const [client, transaction, expected] of [["account", {}, 0], ["product", {}, 1], ["account", undefined, 1]]) {
+  const callback = "https://account.onesa.test/callback";
+  const transaction = {
+    protocol: "oidc-basic-profile",
+    redirect_uri: callback,
+    requested_scopes: ["openid", "email"],
+    response_type: ["code"],
+  };
+  const event = {
+    connection: { id: "con_fixture", name: "Username-Password-Authentication", strategy: "auth0" },
+    request: { method: "POST", body: { client_id: "account", redirect_uri: callback } },
+    tenant: { id: "onesa-fixture" },
+    user: { email: "signup@example.test" },
+    secrets: { ACCOUNT_CLIENT_ID: "account", ACCOUNT_CALLBACK_URL: callback },
+    transaction,
+  };
+  const log = t.mock.method(console, "log", () => {});
+  for (const [override, reason] of [
+    [{ client: { client_id: "account" } }, null],
+    [{ client: { client_id: "account" }, transaction: {} }, null],
+    [{}, null],
+    [{ transaction: { ...transaction, response_type: undefined } }, null],
+    [{ client: { client_id: "product", name: "Onesa Account" } }, "account_client_mismatch"],
+    [{ transaction: undefined, client: { client_id: "account" } }, "hosted_transaction_missing"],
+    [{ transaction: undefined }, "hosted_transaction_missing"],
+    [{ transaction: { ...transaction, redirect_uri: "https://product.onesa.test/callback" } }, "account_callback_unconfirmed"],
+    [{ transaction: { ...transaction, redirect_uri: callback + "?lookalike=1" } }, "account_callback_unconfirmed"],
+    [{ transaction: { ...transaction, protocol: "oauth2-password" } }, "account_callback_unconfirmed"],
+    [{ transaction: { ...transaction, response_type: ["token"] } }, "account_callback_unconfirmed"],
+    [{ secrets: { ACCOUNT_CLIENT_ID: "account" } }, "account_callback_unconfirmed"],
+    [{ secrets: { ACCOUNT_CALLBACK_URL: callback } }, "account_client_unconfigured"],
+  ]) {
     const denied = [];
-    await action.onExecutePreUserRegistration({ client: { client_id: client }, transaction,
-      secrets: { ACCOUNT_CLIENT_ID: "account" } }, { access: { deny: code => denied.push(code) } });
-    assert.equal(denied.length, expected);
+    log.mock.resetCalls();
+    await action.onExecutePreUserRegistration({ ...event, ...override },
+      { access: { deny: code => denied.push(code) } });
+    assert.deepEqual(denied, reason ? ["onesa_account_registration_required"] : []);
+    assert.deepEqual(log.mock.calls.map(call => JSON.parse(call.arguments[0])),
+      reason ? [{ event: "onesa_signup_entry_denied", reason }] : []);
   }
 });

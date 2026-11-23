@@ -66,3 +66,9 @@ Ordinary Portal login requests the standard PAPE multi-factor ACR and receives t
 ## Verification scope
 
 The synthetic tests exercise the administration and policy routes, stale forms, role boundaries, duplicate email ownership, grants and revocation, suspension, one-use browser challenges, OIDC Code/PKCE/nonce and signed token verification, Action failure, bulk-import replay and restore after cutover updates. A hosted tenant, DNS, production data, controlled-inbox delivery, device and native-client tests require separate release evidence.
+
+## Hosted signup Action verification
+
+Set the Pre User Registration Action's `ACCOUNT_CLIENT_ID` to the exact Auth0 client ID used by the Account runtime. Auth0 can omit the client from this event. After confirming that `IDENTITY_ORIGIN/callback` appears on the Account client's Allowed Callback URLs and no other enabled client's callback allowlist can match it, set the Action's `ACCOUNT_CALLBACK_URL` to that exact HTTPS URL. This permits a provider-validated hosted authorization code transaction when the client field is absent. Explicit mismatched clients and direct API signup stay denied.
+
+If an approved signup fails, inspect the Action's `onesa_signup_entry_denied` reason. Record the current deployed version before deploying an update. To roll back, choose that version in **Version History** and select **Revert**. Auth0 deploys a copy of the selected version through the existing binding.
