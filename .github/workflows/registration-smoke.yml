@@ -27,7 +27,7 @@ jobs:
           node-version: '24'
       - name: Run public HTTP availability and PKCE preflight
         env:
-          STRICT_LIVE_SMOKE: '1'
+          STRICT_LIVE_SMOKE: ${{ (github.event_name != 'workflow_dispatch' || inputs.strict) && '1' || '0' }}
         run: node scripts/portfolio-registration-smoke.mjs
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
