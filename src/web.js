@@ -1,7 +1,10 @@
 import * as oidc from "openid-client";
 import { returnKey } from "./registration-returns.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { secret, digest, Rejected, products, accountProducts, registrations, sharedRole, configurableAdminRoles } from "./store.js";
+import {
+  secret, digest, Rejected, products, accountProducts, registrations,
+  productAdministratorRequests, sharedRole, configurableAdminRoles,
+} from "./store.js";
 
 const esc = (value) =>
   String(value ?? "").replace(
@@ -27,7 +30,7 @@ const readCookie = (req, key) =>
     .split(/;\s*/)
     .find((c) => c.startsWith("__Host-onesa-" + key + "="))
     ?.split("=")[1] ?? "";
-const page = (title, body, status = 200, wide = false) =>
+const page = (title, body, status = 200, wide = false, administration = false) =>
   new Response(`<!doctype html><html lang="en"><head>
     <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     <title>${esc(title)} · Onesa Account</title>
@@ -44,9 +47,27 @@ const page = (title, body, status = 200, wide = false) =>
       p { margin: 0 0 1rem; }
       .muted { color: #526B69; }
       article { margin: 1rem 0; padding: 1rem; border: 1px solid #D9E6E1; border-radius: 10px; background: #FBFDFC; }
-      .actions, nav, .products li { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1.25rem; }
-      .products { padding: 0; list-style: none; }
-      .products li { justify-content: space-between; padding: .7rem 0; border-bottom: 1px solid #d4dce5; }
+      .actions, nav { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1.25rem; }
+      .account-summary, .account-panel { padding: clamp(16px, 3vw, 24px); border: 1px solid #D9E6E1; border-radius: 14px; }
+      .account-summary { margin-bottom: 16px; background: #F0F8F5; }
+      .account-summary p, .account-panel p:last-child { margin-bottom: 0; }
+      .account-summary .muted { margin-top: .55rem; }
+      .account-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); align-items: start; gap: 16px; }
+      .account-side { display: grid; gap: 16px; }
+      .account-panel h2 { margin: 0 0 .6rem; color: #102B29; }
+      .account-panel form label { margin: 0; }
+      .account-panel .actions { align-items: end; gap: .5rem; }
+      .account-panel details summary { padding: .45rem 0; cursor: pointer; color: #365753; }
+      .account-panel details[open] summary { margin-bottom: .35rem; }
+      .status-pill { display: inline-block; border-radius: 999px; padding: .18rem .62rem; background: #E8EDF3; color: #31445D; font-size: .875rem; font-weight: 700; }
+      .status-active { background: #DDF1E7; color: #165440; }
+      .status-pending { background: #FFF0D3; color: #6B430C; }
+      .products { display: grid; gap: .55rem; padding: 0; margin: .75rem 0 1rem; list-style: none; }
+      .products li { display: grid; gap: .35rem; padding: .75rem; border: 1px solid #D9E6E1; border-radius: 10px; }
+      .products li:target { border-color: #0B725E; background: #F0F8F5; }
+      .product-states { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; }
+      .account-footer { margin-top: 16px; }
+      @media (max-width: 700px) { .account-grid { grid-template-columns: 1fr; } }
       label { display: inline-grid; max-width: 100%; margin: .3rem; gap: .2rem; }
       a { color: #087F68; text-underline-offset: 3px; }
       a:hover { color: #065C4E; }
@@ -54,10 +75,10 @@ const page = (title, body, status = 200, wide = false) =>
       button, .primary { cursor: pointer; }
       .primary { display: inline-flex; align-items: center; background: #0B725E; border-color: #0B725E; color: white; text-decoration: none; }
       .primary:hover { background: #095C4D; border-color: #095C4D; }
-      :is(a, button, input, select):focus-visible { outline: 3px solid #00B894; outline-offset: 3px; }
+      :is(a, button, input, select, summary):focus-visible { outline: 3px solid #00B894; outline-offset: 3px; }
     </style></head><body>
     <header><a href="/account"><img src="https://onesa.eu/brand/icons/v1/onesa-company-180.png" alt="" width="32" height="32">Onesa Account</a>
-    <nav aria-label="Account"><a href="/account">My account</a><a href="/admin">Administration</a></nav></header>
+    <nav aria-label="Account"><a href="/account">My account</a>${administration ? '<a href="/admin">Administration</a>' : ""}</nav></header>
     <main${wide ? ' class="wide"' : ""}><h1>${esc(title)}</h1>${body}</main></body></html>`,
     { status, headers: { "content-type": "text/html; charset=utf-8" } },
   );
@@ -123,7 +144,7 @@ const redirect = (url, cookies = []) => {
   for (const c of cookies) headers.append("set-cookie", c);
   return new Response(null, { status: 303, headers });
 };
-const accountSections = new Set(["#product-access", "#account-security", "#account-closure"]);
+const accountSections = new Set(["#product-access", "#administrator-access", "#account-security", "#account-closure"]);
 const retryPath = (destination, origin) => {
   const target = new URL(destination, origin);
   const invite = target.searchParams.get("invite");
@@ -164,6 +185,18 @@ const options = (items, selected) =>
   items.map((item) =>
     (item === selected ? "<option selected>" : "<option>") + esc(item) + "</option>"
   ).join("");
+const accessLabels = { pending: "Awaiting approval", active: "Approved", revoked: "Access removed", rejected: "Request declined" };
+const administratorLabels = {
+  pending: "Administrator request pending",
+  active: "Administrator approved",
+  rejected: "Administrator request declined",
+  revoked: "Administrator access removed",
+};
+const pill = (status, label) => '<span class="status-pill status-' + esc(status) + '">' + esc(label) + "</span>";
+const productSelect = (label, entries) =>
+  '<label>' + esc(label) + '<select name="product" required><option value="" disabled selected>Choose a product</option>' +
+  entries.map(([product, { name }]) => '<option value="' + esc(product) + '">' + esc(name) + "</option>").join("") +
+  "</select></label>";
 const mfaClaim = "https://onesa.eu/claims/mfa_time";
 async function sendVerificationEmail(verification, subject, accountClient) {
   const options = {
@@ -238,41 +271,63 @@ export function createApp(store, env, client = authClient(env)) {
   const adminEnabled = new Set(Array.from(env.resources.values())
     .filter(resource => ["admin", "administrator"].includes(resource.sharedAdminRole))
     .map(resource => resource.product));
-  function productAccess(session) {
+  function productPanels(session) {
     const tiers = registrations(store.db, session.id);
     const decisions = new Map(store.all(
       "SELECT product,status,role FROM grants WHERE id=?", session.id,
     ).map(row => [row.product, row]));
-    const statusLabels = { pending: "Awaiting approval", active: "Approved", revoked: "Access removed", rejected: "Request declined" };
+    const administrators = new Set(store.all(
+      "SELECT product FROM product_administrators WHERE id=? AND status='active'", session.id,
+    ).map(row => row.product));
+    const requests = productAdministratorRequests(store.db, session.id);
     const rows = [];
+    const additionalAccess = [];
+    const additionalAdministrator = [];
     for (const [product, { name }] of accountProducts) {
       const legacy = product === "internal-documents" && decisions.get("engineering-documents");
       let decision = decisions.get(product) || legacy;
-      const inherited = connectedProducts.has(product) && sharedRole(product, tiers, adminEnabled.has(product));
+      const connected = connectedProducts.has(product);
+      const inherited = connected && sharedRole(product, tiers, adminEnabled.has(product));
       if (!decision && inherited) decision = { status: "active", role: inherited };
-      if (!decision && !connectedProducts.has(product)) continue;
+      const administrator = administrators.has(product) ||
+        (decision?.status === "active" && ["administrator", "owner"].includes(decision.role));
+      const request = administrator ? "active" : requests.get(product);
+      const entry = [product, { name }];
+      if (connected && !decision && !administrator) additionalAccess.push(entry);
+      if (connected && !request) additionalAdministrator.push(entry);
+      if (!decision && !request) continue;
       const label = legacy && !decisions.has(product) ? "Internal Documents (Engineering)" : name;
-      let control;
-      if (decision) {
-        control = '<span>' + esc(statusLabels[decision.status]) +
-          (decision.status === "active" ? ' · ' + esc(decision.role) : '') + '</span>';
-      } else {
-        control = post("/account/access", session.csrf, hidden("product", product) +
-          '<button aria-label="Request access to ' + esc(name) + '">Request access</button>');
+      const states = [];
+      if (decision && (!administrator || !["administrator", "owner"].includes(decision.role))) {
+        const status = decision.status === "active" && session.state === "pending" ? "pending" : decision.status;
+        const copy = status === "active" ? "Approved · " + decision.role :
+          status === decision.status ? accessLabels[status] : "Waiting for account approval";
+        states.push(pill(status, copy));
       }
-      rows.push("<li><strong>" + esc(label) + "</strong>" + control + "</li>");
+      if (request) states.push(request === "active" && session.state === "pending"
+        ? pill("pending", "Administrator access waiting for account approval")
+        : pill(request, administratorLabels[request]));
+      const destination = returns.get(returnKey(product, "web", administrator ? "admin" : "user"));
+      const open = connected && session.state === "active" && destination &&
+        (administrator || decision?.status === "active")
+        ? '<a href="' + esc(destination) + '">Open ' + esc(name) + '</a>' : "";
+      rows.push('<li id="access-' + esc(product) + '"><strong>' + esc(label) + '</strong>' +
+        '<div class="product-states">' + states.join("") + "</div>" + open + "</li>");
     }
-    return '<h2 id="product-access">Product access</h2>' +
-      (rows.length ? '<ul class="products">' + rows.join("") + '</ul>' : '<p>No products are available to request yet.</p>');
-  }
-  function registrationPanel(session) {
-    const states = registrations(store.db, session.id);
-    const labels = { pending: "Awaiting review", active: "Approved", rejected: "Declined", revoked: "Access removed" };
-    return "<h2>Onesa registration</h2>" + ["user", "admin"].map(tier => {
-      const title = tier === "admin" ? "Administrator" : "User";
-      return states.has(tier) ? "<p>" + title + " · " + esc(labels[states.get(tier)]) + "</p>" :
-        post("/account/enrollment", session.csrf, hidden("tier", tier) + "<button>Request " + title.toLowerCase() + " registration</button>");
-    }).join("");
+    const accountAccess = '<section class="account-panel" aria-labelledby="product-access"><h2 id="product-access">Product access</h2>' +
+      (rows.length ? '<ul class="products">' + rows.join("") + '</ul>' : '<p>No product access requests yet.</p>') +
+      (additionalAccess.length ? post("/account/access", session.csrf, '<div class="actions">' +
+        productSelect("Additional product", additionalAccess) + "<button>Request access</button></div>") : "") +
+      (tiers.size ? '<details><summary>Earlier Onesa registration requests</summary>' +
+        [...tiers].map(([tier, status]) => "<p>" + (tier === "admin" ? "Administrator" : "User") + " · " +
+          esc(accessLabels[status]) + "</p>").join("") + "</details>" : "") + "</section>";
+    const administratorAccess = '<section class="account-panel" aria-labelledby="administrator-access">' +
+      '<h2 id="administrator-access">Administrator access</h2><p>Choose the product you need to administer. A reviewer must approve your request.</p>' +
+      (additionalAdministrator.length ? post("/account/enrollment", session.csrf, hidden("tier", "admin") +
+        '<div class="actions">' + productSelect("Product", additionalAdministrator) +
+        "<button>Request administrator access</button></div>") :
+        '<p>See your administrator access status under <a href="#product-access">Product access</a>.</p>') + "</section>";
+    return { accountAccess, administratorAccess };
   }
   async function handle(req) {
     const url = new URL(req.url),
@@ -352,7 +407,9 @@ export function createApp(store, env, client = authClient(env)) {
         user_id: actor.id,
         product,
         roles: [role],
-        ...(!explicit && product === "portal" && role === "administrator" ? { portal_staff_registration: true } : {}),
+        ...(product === "portal" && role === "administrator" &&
+          (!explicit || managedAdministrator && productAdministratorRequests(store.db, actor.id).get("portal") === "active")
+          ? { portal_staff_registration: true } : {}),
         // Every privileged role requires recent MFA, including explicit grants.
         // An explicit product grant must never downgrade the authentication
         // requirements of the identical role inherited through registration.
@@ -502,16 +559,17 @@ export function createApp(store, env, client = authClient(env)) {
         return verificationPage(flow.destination, env, "required");
       const target = new URL(flow.destination, env.origin);
       const product = target.searchParams.get("product");
-      const destination = product && target.searchParams.has("enrollment") && returns.get(returnKey(product, target.searchParams.get("platform"),
-        target.searchParams.get("enrollment")));
-      if (product && target.searchParams.has("enrollment") && !destination)
+      const tier = target.searchParams.get("enrollment");
+      const destination = product && tier && returns.get(returnKey(product, target.searchParams.get("platform"), tier));
+      if (product && tier && !destination)
         return page("Product registration unavailable", "The product return is no longer configured.", 503);
       const user = store.register(
         env.issuer,
         identity.sub,
         identity.email,
         target.searchParams.get("invite") || "",
-        target.searchParams.get("enrollment"),
+        tier,
+        destination ? product : null,
       );
       target.searchParams.delete("enrollment");
       if (["suspended", "rejected"].includes(user.status))
@@ -569,9 +627,9 @@ export function createApp(store, env, client = authClient(env)) {
           '<p class="muted">Use one Onesa account across your approved products. Create an account, verify your email, and request access to the products you need.</p>' +
           '<div class="actions"><a class="primary" href="/login' + suffix + '">Sign in to Onesa</a>' +
           '<a href="/register' + suffix + '">Create an Onesa account</a>' +
-          '<a href="/register?audience=admin' + (suffix ? '&amp;' + suffix.slice(1) : '') + '">Request administrator registration</a></div>' +
+          '<a href="' + featureSignIn("#administrator-access") + '">Request administrator access</a></div>' +
           '<section aria-labelledby="access-overview"><h2 id="access-overview">Product access</h2>' +
-          '<p>Check your access and request approval for another product. For example, a Smart Farmer request can show “Awaiting approval” while an administrator reviews it.</p>' +
+          '<p>See your product access, request another product, or check the status of an administrator request.</p>' +
           '<p>' + Array.from(accountProducts.values(), ({ name }) => esc(name)).join(" · ") + '</p>' +
           '<a href="' + featureSignIn("#product-access") + '">Sign in to manage product access</a></section>' +
           '<section aria-labelledby="security-overview"><h2 id="security-overview">Account security</h2>' +
@@ -579,17 +637,19 @@ export function createApp(store, env, client = authClient(env)) {
           '<a href="' + featureSignIn("#account-security") + '">Sign in to manage account security</a></section>',
         );
       }
-      if (p !== "/admin")
+      if (p !== "/admin") {
+        const panels = productPanels(session);
+        const active = session.state === "active";
         return page(
           "Your Onesa account",
-          "<p>" +
-            esc(session.email) +
-            " · " +
-            esc(session.state) +
-            '</p>' +
-            (session.state === "pending" ? '<p>Your account is awaiting administrator approval.</p>' : '') +
-            registrationPanel(session) + productAccess(session) +
-            '<h2 id="account-security">Account security</h2><p><a href="/verify-factor">Verify or enroll a second factor</a></p>' +
+          '<div class="account-summary"><div class="actions"><strong><!--email_off-->' +
+            esc(session.email) + '<!--/email_off--></strong>' +
+            pill(session.state, active ? "Account active" : "Account pending") +
+            '</div><p class="muted">Email verified</p>' +
+            (active ? "" : '<p class="muted">Your account is awaiting administrator approval.</p>') + '</div>' +
+            '<div class="account-grid">' + panels.accountAccess + '<div class="account-side">' + panels.administratorAccess +
+            '<section class="account-panel" aria-labelledby="account-security"><h2 id="account-security">Account security</h2>' +
+            '<p><a href="/verify-factor?return=%2Faccount%23account-security">Set up or verify a second factor</a></p>' +
             (env.connection
               ? post(
                   "/account/recovery",
@@ -597,24 +657,42 @@ export function createApp(store, env, client = authClient(env)) {
                   "<button>Send password reset email</button>",
                 )
               : "<p>Use Forgot password on the sign-in screen to recover your password.</p>") +
-            '<h2 id="account-closure">Account closure</h2>' +
-            '<p>Request closure of your Onesa account. This immediately suspends central access and queues credential and product-data cleanup. Completion of downstream erasure is separately verified; applicable legal retention still applies.</p>' +
+            '</section><section class="account-panel" aria-labelledby="account-closure"><h2 id="account-closure">Account closure</h2>' +
+            '<details><summary>Close your Onesa account</summary>' +
+            '<p>Closure immediately suspends access and starts account and product-data cleanup. Onesa verifies cleanup separately and retains records as required by law.</p>' +
             post("/account/delete", session.csrf,
-              '<label>Type DELETE to confirm <input name="confirm" required autocomplete="off" spellcheck="false"></label>' +
-              '<button>Request account closure</button>') +
-            post("/logout", session.csrf, env.auth0LogoutEnabled ? "<button>Sign out</button>" : "<button>Sign out here</button>"),
+              '<div class="actions"><label>Type DELETE to confirm<input name="confirm" required autocomplete="off" spellcheck="false"></label>' +
+              '<button>Request account closure</button></div>') +
+            '</details></section></div></div><div class="account-footer">' +
+            post("/logout", session.csrf, env.auth0LogoutEnabled ? "<button>Sign out</button>" : "<button>Sign out here</button>") + '</div>',
+          200, true, store.activeGrant(session.id, "identity")?.role === "administrator",
         );
+      }
     }
     let form;
     if (method === "POST") {
-      if (!session || req.headers.get("origin") !== env.origin)
-        return new Response(null, { status: 403 });
+      const section = p === "/account/enrollment" ? "#administrator-access" :
+        p === "/account/access" ? "#product-access" :
+        p === "/account/delete" ? "#account-closure" : "#account-security";
+      const back = "/account" + section;
+      const accountAction = p.startsWith("/account/") || p === "/logout";
+      if (!session && accountAction)
+        return page("Sign in to continue", '<p>Your Onesa Account session has ended.</p><a class="primary" href="/login?return=' +
+          encodeURIComponent(back) + '">Sign in again</a>', 401);
+      const formDenied = () => accountAction
+        ? page("Reload your Onesa account", '<p>Onesa could not verify this form. Open your account and submit the request again.</p>' +
+          '<a class="primary" href="' + back + '">Return to your account</a>', 403)
+        : new Response(null, { status: 403 });
+      if (!session || req.headers.get("origin") !== env.origin) return formDenied();
       form = new URLSearchParams(await req.text());
-      if (!compare(form.get("csrf"), session.csrf))
-        return new Response(null, { status: 403 });
+      if (!compare(form.get("csrf"), session.csrf)) return formDenied();
       if (p === "/account/enrollment") {
-        store.requestRegistration(session.id, form.get("tier"));
-        return redirect("/account");
+        const product = form.get("product");
+        if (form.getAll("product").length > 1 || form.getAll("tier").length !== 1 ||
+            (product !== null && (!connectedProducts.has(product) || !accountProducts.has(product) || form.get("tier") !== "admin")))
+          return page("Choose a product", '<a href="/account#administrator-access">Return to administrator access</a>', 400);
+        store.requestRegistration(session.id, form.get("tier"), product);
+        return redirect(product ? "/account#access-" + product : "/account");
       }
       if (p === "/account/access") {
         const product = form.get("product");
@@ -705,7 +783,7 @@ export function createApp(store, env, client = authClient(env)) {
     if (!["/admin", "/admin/change", "/admin/invite"].includes(p))
       return page("Page unavailable", "", 404);
     const identityGrant = session && store.activeGrant(session.id, "identity");
-    const scopeProduct = url.searchParams.get("product") || form?.get("product") || "";
+    const scopeProduct = (method === "POST" ? form?.get("product") : url.searchParams.get("product")) || "";
     if (scopeProduct && !Object.hasOwn(products, scopeProduct))
       return page("Product unavailable", "", 404);
     const scopedGrant = session && scopeProduct
@@ -743,15 +821,32 @@ export function createApp(store, env, client = authClient(env)) {
           return "<li><strong>" + esc(user.email) + "</strong> · " + esc(user.source) + " " + action + "</li>";
         }).join("");
         const productName = accountProducts.get(scopeProduct)?.name || scopeProduct;
+        const requests = store.all(
+          `SELECT a.id,a.email,a.revision FROM accounts a
+            JOIN audit e ON e.seq=(
+              SELECT seq FROM audit WHERE target=a.id AND action='product-administrator-request'
+                AND json_extract(detail,'$.product')=? ORDER BY seq DESC LIMIT 1
+            )
+            WHERE a.status IN ('active','pending') AND json_extract(e.detail,'$.status')='pending'
+            ORDER BY a.email`,
+          scopeProduct,
+        );
+        const reviews = requests.map(user => "<li><strong>" + esc(user.email) + "</strong> " +
+          (session.id === user.id ? '<span>Another administrator must review this request.</span>' :
+            post("/admin/change", session.csrf, hidden("kind", "product-administrator-review") +
+              hidden("product", scopeProduct) + hidden("id", user.id) + hidden("revision", user.revision) +
+              '<button name="status" value="active">Approve administrator access</button> ' +
+              '<button name="status" value="rejected">Decline request</button>')) + "</li>").join("");
         return page(
           productName + " administrators",
-          "<p>Manage administrator access for " + esc(productName) + ". Only active, verified Onesa accounts can be added. Changes are recorded in the Identity audit log.</p>" +
+          (reviews ? "<h2>Pending administrator requests</h2><ul>" + reviews + "</ul>" : "") +
+            "<h2>Current administrators</h2>" +
             "<ul>" + (list || "<li>No administrators assigned.</li>") + "</ul>" +
             post("/admin/change", session.csrf,
               hidden("kind", "product-administrator") + hidden("product", scopeProduct) + hidden("status", "active") +
               '<label>Verified Onesa account email<input type="email" name="email" required autocomplete="off"></label>' +
               '<button>Add administrator</button>') +
-            '<p><a href="/admin">Identity administration</a></p>',
+            (globalAdministrator ? '<p><a href="/admin">Identity administration</a></p>' : ""),
         );
       }
       const users = store.all(
@@ -774,6 +869,10 @@ export function createApp(store, env, client = authClient(env)) {
               "<fieldset><legend>" + title + " · " + esc(status) + "</legend>" + buttons + "</fieldset>");
           }).join("");
           const grants = store.all("SELECT product,role,status FROM grants WHERE id=? ORDER BY product", u.id);
+          const administratorRequests = [...productAdministratorRequests(store.db, u.id)]
+            .filter(([, status]) => status === "pending")
+            .map(([product]) => '<p><a href="/admin?product=' + esc(product) + '">Review ' +
+              esc(accountProducts.get(product).name) + ' administrator request</a></p>').join("");
           const reviews = grants.filter(g =>
             g.status === "pending" && accountProducts.get(g.product)?.role === g.role,
           ).map(g => post("/admin/change", session.csrf,
@@ -801,7 +900,7 @@ export function createApp(store, env, client = authClient(env)) {
                 options(["active", "suspended", "pending", "rejected"], u.status) +
                 "</select></label><button>Update account</button>",
             ) +
-            enrollmentReviews + reviews +
+            enrollmentReviews + reviews + administratorRequests +
             post(
               "/admin/change",
               session.csrf,
@@ -853,7 +952,7 @@ export function createApp(store, env, client = authClient(env)) {
           "<h2>Recent audit history</h2><ol>" +
           history +
           "</ol>",
-        200, true,
+        200, true, true,
       );
     }
     if (p === "/admin/invite" && method === "POST") {
@@ -866,8 +965,17 @@ export function createApp(store, env, client = authClient(env)) {
       );
     }
     if (p === "/admin/change" && method === "POST") {
-      const scope = form.get("product") || "";
+      const scope = scopeProduct;
+      if (form.get("kind") === "product-administrator-review" && scope) {
+        store.change(session.id, form.get("id"), Number(form.get("revision")), {
+          kind: "product-administrator-review",
+          product: scope,
+          status: form.get("status"),
+        }, scope);
+        return redirect("/admin?product=" + encodeURIComponent(scope));
+      }
       if (form.get("kind") === "product-administrator") {
+        if (!scope) return page("Choose a product", '<a href="/admin">Return to Identity administration</a>', 400);
         let targetId = form.get("id");
         let targetRevision = Number(form.get("revision"));
         if (form.get("status") === "active") {

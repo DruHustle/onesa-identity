@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openStore, digest, products, registrations, accountProducts } from "../src/store.js";
+import { openStore, digest, products, registrations, accountProducts, productAdministratorRequests } from "../src/store.js";
 import { createApp } from "../src/web.js";
 import { configuration } from "../src/server.js";
 import { registrationReturns, returnKey } from "../src/registration-returns.js";
@@ -346,7 +346,137 @@ test("verification and expired login retry resume the original product across tw
   assert.match(await expired.text(), /audience=admin&amp;product=farmer&amp;platform=ios/);
   const finalState = await start((await visit("/account/registration/resume")).headers.get("location"));
   assert.equal((await signIn(finalState)).headers.get("location"), registry.get("farmer/ios/admin"));
+  const account = store.lookup(env.issuer, "oidc|pilot");
+  assert.equal(store.activeGrant(account.id, "drone").role, "viewer");
+  assert.equal(store.activeGrant(account.id, "farmer"), undefined);
+  assert.deepEqual([...productAdministratorRequests(store.db, account.id)], [["farmer", "pending"]]);
+  assert.equal(registrations(store.db, account.id).size, 0);
   assert.equal((await visit("/account/registration/resume")).headers.get("location"), "/account");
+});
+
+test("verified product registration grants ordinary access only to the originating self-service product", async t => {
+  const resources = new Map(env.resources);
+  resources.set("https://api.factory.onesa.test", { product: "factory", clients: ["factory-web"] });
+  const { call, store, login, setRedeem, admin } = await fixture(t, {
+    resources, registrationReturns: registrationReturns("https://account.onesa.eu"),
+  });
+  await login("link-only", "/account?product=farmer&enrollment=user");
+  const linkOnly = store.lookup(env.issuer, "oidc|link-only");
+  assert.equal(store.activeGrant(linkOnly.id, "farmer"), undefined);
+  const identity = name => ({ iss: env.issuer, sub: "oidc|" + name, email: name + "@onesa.test", email_verified: true });
+  const signup = async (product, name) => {
+    setRedeem(async () => identity(name));
+    const started = await call("/register?product=" + product);
+    const state = new URL(started.headers.get("location")).searchParams.get("state");
+    const cookie = started.headers.getSetCookie().map(value => value.split(";")[0]).join("; ");
+    return call("/callback?code=fixture&state=" + state, "GET", undefined, { cookie });
+  };
+  const decide = (name, audience, client) => call("/internal/decision", "POST",
+    JSON.stringify({ subject: "oidc|" + name, audience, client }), { authorization: "Bearer " + env.policyKey });
+  const done = await signup("farmer", "farmer-signup");
+  assert.equal(done.headers.get("location"), "https://farmer.onesa.eu/auth/registration/complete");
+  const farmer = store.lookup(env.issuer, "oidc|farmer-signup");
+  assert.equal(farmer.status, "active");
+  assert.deepEqual(await (await decide("farmer-signup", "https://api.farmer.onesa.eu", "farmer-web")).json(),
+    { user_id: farmer.id, product: "farmer", roles: ["user"] });
+  assert.equal((await decide("farmer-signup", "https://api.factory.onesa.test", "factory-web")).status, 403);
+  assert.equal((await decide("farmer-signup", "https://api.docs.onesa.eu", "docs-web")).status, 403);
+  assert.deepEqual([...registrations(store.db, farmer.id)], []);
+  const cookie = done.headers.getSetCookie().find(value => value.startsWith("__Host-onesa-session=")).split(";")[0];
+  const html = await (await call("/account", "GET", undefined, { cookie })).text();
+  assert.match(html, /<!--email_off-->farmer-signup@onesa\.test<!--\/email_off-->/);
+  assert.match(html, /Smart Farmer<\/strong>[\s\S]*?Approved · user[\s\S]*?Open Smart Farmer/);
+  assert.match(html, /<option value="factory">Smart Factory<\/option>/);
+  assert.doesNotMatch(html, /href="\/admin"/);
+  await signup("farmer", "farmer-signup");
+  assert.equal(store.lookup(env.issuer, "oidc|farmer-signup").revision, farmer.revision);
+  store.change(admin.id, farmer.id, farmer.revision, { kind: "grant", product: "farmer", role: "user", status: "revoked" });
+  await signup("farmer", "farmer-signup");
+  assert.equal((await decide("farmer-signup", "https://api.farmer.onesa.eu", "farmer-web")).status, 403);
+
+  assert.equal((await signup("internal-documents", "docs-signup")).status, 303);
+  const docs = store.lookup(env.issuer, "oidc|docs-signup");
+  assert.equal(docs.status, "pending");
+  assert.equal(store.one("SELECT status FROM grants WHERE id=? AND product='internal-documents'", docs.id).status, "pending");
+  assert.equal((await decide("docs-signup", "https://api.docs.onesa.eu", "docs-web")).status, 403);
+
+  const old = store.register(env.issuer, "oidc|previous-member", "previous-member@onesa.test");
+  store.change(admin.id, old.id, old.revision, { kind: "grant", product: "factory", role: "administrator", status: "active" });
+  assert.equal((await signup("farmer", "previous-member")).status, 303);
+  assert.equal(store.lookup(env.issuer, "oidc|previous-member").status, "pending");
+  assert.equal((await decide("previous-member", "https://api.factory.onesa.test", "factory-web")).status, 403);
+});
+
+test("a pending verified account can request a single product's administrator access and get an independent decision", async t => {
+  const resources = new Map(env.resources);
+  resources.set("https://api.factory.onesa.test", { product: "factory", clients: ["factory-web"] });
+  const { call, store, login } = await fixture(t, { resources });
+  const member = await login("requesting-admin", "/account", 0);
+  const actor = store.lookup(env.issuer, "oidc|requesting-admin");
+  const memberHeaders = { cookie: member.cookie, origin: env.origin };
+  const account = () => call("/account", "GET", undefined, memberHeaders);
+  const html = await (await account()).text();
+  assert.match(html, /Request administrator access<\/button>/);
+  const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
+  const request = (product, headers = memberHeaders, token = csrf) => call("/account/enrollment", "POST",
+    new URLSearchParams({ product, tier: "admin", csrf: token }), headers);
+  const expired = await request("farmer", { origin: env.origin });
+  assert.equal(expired.status, 401);
+  assert.match(await expired.text(), /Sign in to continue/);
+  const stale = await request("farmer", memberHeaders, "invalid");
+  assert.equal(stale.status, 403);
+  assert.match(await stale.text(), /Reload your Onesa account/);
+  assert.equal((await request("farmer", { ...memberHeaders, origin: "https://outside.test" })).status, 403);
+  assert.equal((await request("identity")).status, 400);
+  assert.deepEqual([...productAdministratorRequests(store.db, actor.id)], []);
+
+  const accepted = await request("farmer");
+  assert.equal(accepted.status, 303);
+  assert.equal(accepted.headers.get("location"), "/account#access-farmer");
+  assert.match(await (await account()).text(), /Smart Farmer<\/strong>[\s\S]*?Administrator request pending/);
+  assert.equal((await request("farmer")).status, 303);
+  assert.deepEqual([...productAdministratorRequests(store.db, actor.id)], [["farmer", "pending"]]);
+  assert.equal(store.lookup(env.issuer, "oidc|requesting-admin").revision, actor.revision + 1);
+  assert.equal(store.lookup(env.issuer, "oidc|requesting-admin").status, "pending");
+  assert.equal((await request("factory")).status, 303);
+  const decide = (audience, client) => call("/internal/decision", "POST",
+    JSON.stringify({ subject: "oidc|requesting-admin", audience, client }),
+    { authorization: "Bearer " + env.policyKey });
+  const farmerDecision = () => decide("https://api.farmer.onesa.eu", "farmer-web");
+  assert.equal((await farmerDecision()).status, 403);
+  assert.equal((await call("/admin?product=farmer", "GET", undefined, memberHeaders)).status, 403);
+
+  function review(headers, csrf, product, status, revision) {
+    return call("/admin/change", "POST", new URLSearchParams({
+      csrf, product, status, revision, kind: "product-administrator-review", id: actor.id,
+    }), headers);
+  }
+  const currentRevision = () => store.lookup(env.issuer, "oidc|requesting-admin").revision;
+  const admin = await login("identity-admin");
+  const adminHeaders = { cookie: admin.cookie, origin: env.origin };
+  const central = await call("/admin?id=" + actor.id, "GET", undefined, adminHeaders);
+  assert.match(await central.text(), /Review Smart Farmer administrator request/);
+  const reviewPage = await call("/admin?product=farmer", "GET", undefined, adminHeaders);
+  assert.equal(reviewPage.status, 200);
+  const reviewHtml = await reviewPage.text();
+  assert.match(reviewHtml, /Pending administrator requests[\s\S]*requesting-admin@onesa\.test[\s\S]*Approve administrator access/);
+  const adminCsrf = reviewHtml.match(/name="csrf" value="([^"]+)"/)[1];
+  const denied = await review(memberHeaders, csrf, "farmer", "active", currentRevision());
+  assert.equal(denied.status, 403);
+  const oldAdmin = await login("identity-admin", "/admin", Date.now() - 360000);
+  const oldHeaders = { cookie: oldAdmin.cookie, origin: env.origin };
+  const oldCsrf = store.one("SELECT csrf FROM sessions WHERE hash=?", digest(oldAdmin.cookie.split("=")[1])).csrf;
+  assert.equal((await review(oldHeaders, oldCsrf, "farmer", "active", currentRevision())).status, 403);
+  const revision = currentRevision();
+  assert.equal((await review(adminHeaders, adminCsrf, "farmer", "active", revision)).status, 303);
+  assert.equal((await review(adminHeaders, adminCsrf, "farmer", "rejected", revision)).status, 409);
+  assert.equal((await review(adminHeaders, adminCsrf, "factory", "rejected", currentRevision())).status, 303);
+  assert.equal((await request("factory")).status, 303);
+  assert.deepEqual(await (await farmerDecision()).json(),
+    { user_id: actor.id, product: "farmer", roles: ["administrator"], require_mfa: true });
+  assert.equal((await decide("https://api.factory.onesa.test", "factory-web")).status, 403);
+  assert.equal(productAdministratorRequests(store.db, actor.id).get("factory"), "rejected");
+  assert.match(await (await account()).text(), /Administrator approved/);
 });
 
 test("one verified signup and independent review give product-scoped user or admin access", async t => {
@@ -439,7 +569,7 @@ test("self-service requests preserve account ownership and require an independen
   const accountPage = () => call("/account", "GET", undefined, { cookie: first.cookie });
   const html = await (await accountPage()).text();
   assert.match(html, /awaiting administrator approval/);
-  assert.match(html, /Request access to Smart Farmer/);
+  assert.match(html, /<option value="farmer">Smart Farmer<\/option>/);
   const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
   const request = (product, token = csrf, origin = env.origin) =>
     call("/account/access", "POST", new URLSearchParams({ product, csrf: token, role: "admin", id: admin.id }),
@@ -461,7 +591,7 @@ test("self-service requests preserve account ownership and require an independen
   assert.deepEqual({ ...store.one("SELECT role,status FROM grants WHERE id=? AND product='farmer'", account.id) },
     { role: "user", status: "pending" });
   assert.equal(store.one("SELECT 1 FROM grants WHERE id=? AND product='farmer'", admin.id), undefined);
-  assert.match(await (await accountPage()).text(), /Smart Farmer<\/strong><span>Awaiting approval/);
+  assert.match(await (await accountPage()).text(), /Smart Farmer<\/strong>[\s\S]*?Awaiting approval/);
   assert.equal((await decide()).status, 403);
   store.change(admin.id, account.id, 2, { kind: "status", status: "active" });
   assert.equal((await decide()).status, 403);
