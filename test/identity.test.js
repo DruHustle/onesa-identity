@@ -309,9 +309,10 @@ test("both registration types return to each registered product and platform wit
 });
 
 test("only the exact Portal web infrastructure landing can be configured", () => {
+  const account = "https://account.onesa.eu";
   const landing = "https://it-infrastructure.onesa.eu/access-requested";
   const approved = JSON.stringify({ portal: { web: { infrastructure: landing } } });
-  assert.equal(registrationReturns(env.origin, approved).get("portal/web/admin/infrastructure"), landing);
+  assert.equal(registrationReturns(account, approved).get("portal/web/admin/infrastructure"), landing);
   for (const [product, platform, destination] of [
     ["portal", "web", "https://other.onesa.test/access-requested"],
     ["portal", "web", landing + "?return=/"],
@@ -321,8 +322,22 @@ test("only the exact Portal web infrastructure landing can be configured", () =>
     ["portal", "ios", landing],
   ]) {
     const override = JSON.stringify({ [product]: { [platform]: { infrastructure: destination } } });
-    assert.throws(() => registrationReturns(env.origin, override));
+    assert.throws(() => registrationReturns(account, override));
   }
+});
+
+test("a separate Account environment requires its own exact infrastructure landing", () => {
+  const configured = destination => JSON.stringify({ portal: { web: { infrastructure: destination } } });
+  const stage = "https://infrastructure-staging.onesa.test/access-requested";
+  assert.equal(registrationReturns(env.origin, configured(stage)).get("portal/web/admin/infrastructure"), stage);
+  for (const invalid of [
+    "https://it-infrastructure.onesa.eu/access-requested",
+    "http://infrastructure-staging.onesa.test/access-requested",
+    stage + "?",
+    stage + "#",
+    stage + "/",
+    stage.replace("https://", "https://person@"),
+  ]) assert.throws(() => registrationReturns(env.origin, configured(invalid)));
 });
 
 test("infrastructure signup resumes after verified email and requests only pending Portal administrator access", async t => {

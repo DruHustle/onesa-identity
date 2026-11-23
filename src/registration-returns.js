@@ -36,7 +36,8 @@ const object = value => value !== null && typeof value === "object" && !Array.is
 export const returnKey = (product, platform, tier, entry = null) =>
   entry === null ? [product, platform, tier].join("/") : [product, platform, tier, entry].join("/");
 export function registrationReturns(origin, override) {
-  const entries = override ? JSON.parse(override) : productionAccountOrigins.has(origin) ? production : {};
+  const isProduction = productionAccountOrigins.has(origin);
+  const entries = override ? JSON.parse(override) : isProduction ? production : {};
   if (!object(entries)) throw Error("Invalid registration return registry");
   const results = new Map();
   for (const [product, platforms] of Object.entries(entries)) {
@@ -48,7 +49,10 @@ export function registrationReturns(origin, override) {
       if (!object(tiers)) throw Error("Invalid registration return destinations");
       for (const [tier, raw] of Object.entries(tiers)) {
         if (tier === infrastructureEntry) {
-          if (product !== "portal" || platform !== "web" || raw !== infrastructureReturn)
+          const url = typeof raw === "string" ? new URL(raw) : null;
+          const usesProductionLanding = raw === infrastructureReturn;
+          if (product !== "portal" || platform !== "web" || !url || url.protocol !== "https:" ||
+              raw !== url.origin + "/access-requested" || isProduction !== usesProductionLanding)
             throw Error("Expected the registered infrastructure landing");
           results.set(returnKey(product, platform, "admin", infrastructureEntry), raw);
           continue;
