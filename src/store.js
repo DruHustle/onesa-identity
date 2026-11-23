@@ -129,6 +129,7 @@ export function openStore(path, { existingOnly = false } = {}) {
     CREATE INDEX IF NOT EXISTS registration_resume_browser ON registration_resumes(hash);
     CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY, id TEXT NOT NULL REFERENCES accounts, csrf TEXT NOT NULL, expires INTEGER NOT NULL, mfa_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS recovery_limit(id TEXT PRIMARY KEY REFERENCES accounts, next INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS verification_email_limit(subject_hash TEXT PRIMARY KEY, next INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS account_deletion_requests(
       id TEXT PRIMARY KEY REFERENCES accounts, requested_at INTEGER NOT NULL,
       status TEXT NOT NULL CHECK(status IN ('requested','reconciled'))

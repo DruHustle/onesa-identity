@@ -369,8 +369,8 @@ test("one verified signup and independent review give product-scoped user or adm
     const signup = tier === "user" ? "/register" : "/register?audience=admin";
     const unverified = await apply(false, signup);
     assert.equal(unverified.status, 403);
-    const retry = (await unverified.text()).match(/href="(\/login\?audience=[^"]+)"/)[1];
-    assert.equal(retry, "/login?audience=" + tier);
+    const retry = (await unverified.text()).match(/href="(\/login\?audience=[^"]+)"/)[1].replaceAll("&amp;", "&");
+    assert.equal(retry, "/login?audience=" + tier + "&email_verification=continue");
     assert.equal(store.lookup(env.issuer, subject), undefined);
     const done = await apply(true, retry);
     assert.equal(done.status, 303);
@@ -1183,6 +1183,112 @@ test("Auth0 Action never sends the policy bearer key to a decorated or non-polic
   } finally {
     globalThis.fetch = original;
   }
+});
+
+test("Account distinguishes a verified OIDC identity with an unverified email from an invalid identity", async (t) => {
+  const { store, call, setRedeem } = await fixture(t, { verification: {} });
+  async function finish(path, claims) {
+    setRedeem(async () => claims);
+    const started = await call(path);
+    const params = new URL(started.headers.get("location")).searchParams;
+    return call("/callback?code=fixture&state=" + params.get("state"), "GET", undefined,
+      { cookie: started.headers.getSetCookie()[0].split(";")[0] });
+  }
+  const identity = { iss: env.issuer, sub: "auth0|fixture", email: "fixture@example.test", email_verified: false };
+  const invalid = await finish("/register", { ...identity, sub: "" });
+  assert.equal(invalid.status, 502);
+  assert.doesNotMatch(await invalid.text(), /Verify your email|Resend verification/);
+
+  const unverified = await finish("/register?audience=admin", identity);
+  assert.equal(unverified.status, 403);
+  const html = await unverified.text();
+  const [, resend] = html.match(/href="([^"]+)">Resend verification email/);
+  assert.equal(resend.replaceAll("&amp;", "&"), "/login?audience=admin&email_verification=resend");
+  const restarted = await call(resend.replaceAll("&amp;", "&"));
+  const params = new URL(restarted.headers.get("location")).searchParams;
+  assert.equal(params.get("prompt"), "login");
+  assert.equal(params.get("max_age"), "0");
+  assert.equal(params.get("onesa_email_verification"), "resend");
+  assert.equal(params.get("code_challenge_method"), "S256");
+  assert.equal(unverified.headers.has("set-cookie"), false);
+  assert.equal(store.lookup(env.issuer, identity.sub), undefined);
+});
+
+test("only the Account Action can request one verification email job per subject during the cooldown", async (t) => {
+  const verification = { origin: "https://verification-fixture.eu.auth0.com",
+    clientId: "dedicated-verification-fixture", clientSecret: "synthetic-secret" };
+  const { store, call } = await fixture(t, { verification });
+  const subject = "auth0|email-fixture";
+  const requests = [];
+  let failProvider = false;
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    requests.push(url);
+    assert.equal(options.redirect, "error");
+    if (url === verification.origin + "/oauth/token") {
+      assert.deepEqual(JSON.parse(options.body), {
+        grant_type: "client_credentials", audience: verification.origin + "/api/v2/",
+        scope: "update:users", client_id: verification.clientId, client_secret: verification.clientSecret,
+      });
+      return Response.json({ token_type: "Bearer", access_token: "synthetic-management-token" });
+    }
+    assert.equal(url, verification.origin + "/api/v2/jobs/verification-email");
+    assert.deepEqual(JSON.parse(options.body), { user_id: subject, client_id: env.clientId });
+    if (failProvider) throw Error("provider unavailable");
+    return new Response(null, { status: 201 });
+  });
+  const send = (user = subject, client = env.clientId, token = env.policyKey) =>
+    call("/internal/email-verification", "POST", JSON.stringify({ subject: user, client }),
+      { authorization: "Bearer " + token });
+  assert.equal((await send(subject, env.clientId, "wrong")).status, 401);
+  assert.equal((await send(subject, "docs-web")).status, 403);
+  assert.equal((await send("fixture@example.test")).status, 403);
+  assert.deepEqual(requests, []);
+  const outcomes = await Promise.all([send(), send()]);
+  assert.deepEqual(outcomes.map(result => result.status).sort(), [202, 429]);
+  assert.equal(requests.length, 2);
+  assert.equal(store.lookup(env.issuer, subject), undefined);
+  assert.equal(store.one("SELECT count(*) AS n FROM sessions").n, 0);
+  store.run("UPDATE verification_email_limit SET next=0");
+  failProvider = true;
+  assert.equal((await send()).status, 503);
+  assert.equal((await send()).status, 429);
+  assert.equal(requests.length, 4);
+});
+
+test("the unverified Auth0 Action only requests email after a fresh password check and always denies access", async (t) => {
+  const network = t.mock.method(globalThis, "fetch", async (url, options) => {
+    assert.equal(url, env.origin + "/internal/email-verification");
+    assert.equal(options.headers.authorization, "Bearer " + env.policyKey);
+    assert.equal(options.redirect, "error");
+    assert.deepEqual(JSON.parse(options.body), { subject: "auth0|fixture", client: env.clientId });
+    return new Response(null, { status: 202 });
+  });
+  const denied = [];
+  const api = { access: { deny: message => denied.push(message) } };
+  const event = {
+    client: { client_id: env.clientId },
+    user: { user_id: "auth0|fixture", email_verified: false },
+    connection: { strategy: "auth0" },
+    authentication: { methods: [{ name: "pwd", timestamp: new Date().toISOString() }] },
+    transaction: { protocol: "oidc-basic-profile", prompt: ["login"] },
+    request: { query: { max_age: "0", onesa_email_verification: "resend" } },
+    secrets: { ACCOUNT_CLIENT_ID: env.clientId, POLICY_ORIGIN: env.origin,
+      POLICY_URL: env.origin + "/internal/decision", POLICY_KEY: env.policyKey },
+  };
+  for (const override of [
+    { client: { client_id: "docs-web" } },
+    { resource_server: { identifier: "https://api.docs.onesa.eu" } },
+    { authentication: { methods: [] } },
+    { transaction: { protocol: "oidc-basic-profile", prompt: ["none"] } },
+    { transaction: { protocol: "oauth2-refresh-token" } },
+    { request: { query: {} } },
+  ])
+    await action.onExecutePostLogin({ ...event, ...override }, api);
+  assert.equal(network.mock.callCount(), 0);
+  assert.equal(denied.length, 6);
+  await action.onExecutePostLogin(event, api);
+  assert.equal(network.mock.callCount(), 1);
+  assert.equal(denied.at(-1), "Onesa email verification request accepted.");
 });
 
 test("password recovery reports provider timeout as 503 without success audit", async (t) => {
