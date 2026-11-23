@@ -74,10 +74,27 @@ export function configuration(env) {
   const policyKey = credential("ACTION_POLICY_KEY");
   if (policyKey.length < 32)
     throw Error("ACTION_POLICY_KEY must be high entropy");
+  const clientId = required("OIDC_CLIENT_ID");
+  let verification;
+  if (env.AUTH0_VERIFICATION_ORIGIN || env.AUTH0_VERIFICATION_CLIENT_ID ||
+      env.AUTH0_VERIFICATION_CLIENT_SECRET || env.AUTH0_VERIFICATION_CLIENT_SECRET_FILE) {
+    const management = new URL(required("AUTH0_VERIFICATION_ORIGIN"));
+    const verificationClientId = required("AUTH0_VERIFICATION_CLIENT_ID");
+    if (management.protocol !== "https:" || !management.hostname.endsWith(".auth0.com") ||
+        management.pathname !== "/" || management.port || management.username ||
+        management.password || management.search || management.hash ||
+        verificationClientId === clientId)
+      throw Error("Expected the Auth0 tenant origin and a separate email verification client");
+    verification = {
+      origin: management.origin,
+      clientId: verificationClientId,
+      clientSecret: credential("AUTH0_VERIFICATION_CLIENT_SECRET"),
+    };
+  }
   return {
     issuer: issuer.href,
     origin: origin.origin,
-    clientId: required("OIDC_CLIENT_ID"),
+    clientId,
     clientSecret: credential("OIDC_CLIENT_SECRET"),
     requireExistingStore: storeMode === "existing",
     resources,
@@ -85,6 +102,7 @@ export function configuration(env) {
     policyKey,
     connection: env.AUTH0_DATABASE_CONNECTION,
     auth0LogoutEnabled: env.AUTH0_LOGOUT_ENABLED === "true",
+    verification,
   };
 }
 

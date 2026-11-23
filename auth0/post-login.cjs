@@ -25,6 +25,44 @@ function infrastructureAudience(event) {
   return { infrastructure: true, portainer, audience: value };
 }
 
+async function verificationDenial(event, policyOrigin, policyKey) {
+  if (!event.secrets.ACCOUNT_CLIENT_ID ||
+      event.client?.client_id !== event.secrets.ACCOUNT_CLIENT_ID ||
+      event.client.client_id === event.secrets.INFRASTRUCTURE_SSO_CLIENT_ID ||
+      event.client.client_id === event.secrets.PORTAINER_SSO_CLIENT_ID ||
+      event.resource_server?.identifier ||
+      event.transaction?.protocol !== "oidc-basic-profile")
+    return "Onesa access is unavailable for this application.";
+
+  const subject = event.user?.user_id;
+  const query = event.request?.query;
+  const now = Date.now();
+  const freshPassword = (event.authentication?.methods || []).some(method => {
+    const timestamp = Date.parse(method.timestamp);
+    return method.name === "pwd" && timestamp <= now && now - timestamp <= 300000;
+  });
+  if (event.connection?.strategy !== "auth0" || !freshPassword ||
+      query?.onesa_email_verification !== "resend" || !event.transaction.prompt?.includes("login") ||
+      (query.max_age !== "0" && query.max_age !== 0) ||
+      typeof subject !== "string" || !/^auth0\|[A-Za-z0-9_-]{1,128}$/.test(subject))
+    return "Onesa email verification is required.";
+
+  try {
+    const response = await fetch(policyOrigin + "/internal/email-verification", {
+      method: "POST",
+      redirect: "error",
+      signal: AbortSignal.timeout(6500),
+      headers: { authorization: "Bearer " + policyKey, "content-type": "application/json" },
+      body: JSON.stringify({ subject, client: event.client.client_id }),
+    });
+    if (response.status === 202) return "Onesa email verification request accepted.";
+    if (response.status === 429) return "Onesa email verification request is rate limited.";
+  } catch {
+    // A retry never grants access when the email provider is unavailable.
+  }
+  return "Onesa email verification request unavailable.";
+}
+
 // POLICY_URL and POLICY_KEY belong in the Action secret store.
 exports.onExecutePostLogin = async (event, api) => {
   const deny = () =>
@@ -33,8 +71,7 @@ exports.onExecutePostLogin = async (event, api) => {
   if (
     !POLICY_URL ||
     !POLICY_ORIGIN ||
-    !POLICY_KEY ||
-    event.user?.email_verified !== true
+    !POLICY_KEY
   )
     return deny();
   let decision;
@@ -61,6 +98,8 @@ exports.onExecutePostLogin = async (event, api) => {
       url.password
     )
       return deny();
+    if (event.user?.email_verified !== true)
+      return api.access.deny(await verificationDenial(event, origin.origin, POLICY_KEY));
     const audience = infrastructureAudience(event);
     infrastructure = audience.infrastructure;
     portainer = audience.portainer === true;

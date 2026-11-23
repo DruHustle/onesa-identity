@@ -1,0 +1,12 @@
+services:
+  identity:
+    environment:
+      AUTH0_VERIFICATION_ORIGIN: "${AUTH0_VERIFICATION_ORIGIN:?Set the Auth0 tenant origin}"
+      AUTH0_VERIFICATION_CLIENT_ID: "${AUTH0_VERIFICATION_CLIENT_ID:?Set the verification-only Management API client ID}"
+      AUTH0_VERIFICATION_CLIENT_SECRET_FILE: /run/secrets/verification_client_secret
+    secrets:
+      - verification_client_secret
+
+secrets:
+  verification_client_secret:
+    file: "${AUTH0_VERIFICATION_CLIENT_SECRET_PATH:?Set the private verification client secret path}"

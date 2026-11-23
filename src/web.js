@@ -66,7 +66,31 @@ const logSignInFailure = (reference, stage, errorClass = "Error") => {
   const safeClass = typeof errorClass === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(errorClass) ? errorClass : "Error";
   console.error(JSON.stringify({ event: "identity_sign_in_failed", reference, stage, errorClass: safeClass }));
 };
-const signInFailure = (code, description, destination, origin) => {
+const verificationPage = (destination, env, outcome) => {
+  const continueLink = '<a href="' + esc(verificationRetryPath(destination, env.origin)) + '">Continue sign-in</a>';
+  const resendLink = '<a class="primary" href="' + esc(verificationRetryPath(destination, env.origin, "resend")) + '">Resend verification email</a>';
+  const copy = {
+    required: ["Verify your email", "Open the verification email from Onesa Identity, then continue sign-in.", 403],
+    accepted: ["Check your inbox", "The email provider accepted the request for a new verification email. Open it to verify your address, then continue sign-in.", 403],
+    limited: ["Verification email already requested", "Check your inbox and spam folder. Wait ten minutes before requesting another email.", 429],
+    unavailable: ["Verification email unavailable", "Onesa could not confirm the email request. Try again later or contact your Onesa administrator.", 503],
+  };
+  const [heading, text, status] = copy[outcome];
+  const help = env.verification
+    ? '<div class="actions">' + (outcome === "required" || outcome === "unavailable" ? resendLink : "") + continueLink + '</div>'
+    : '<p>If the email did not arrive, ask your Onesa administrator to resend it.</p>' + continueLink;
+  return page(heading, '<p>' + text + '</p>' + help, status);
+};
+const verificationOutcomes = new Map([
+  ["Onesa email verification is required.", "required"],
+  ["Onesa email verification request accepted.", "accepted"],
+  ["Onesa email verification request is rate limited.", "limited"],
+  ["Onesa email verification request unavailable.", "unavailable"],
+]);
+const signInFailure = (code, description, destination, env) => {
+  const outcome = code === "access_denied" && verificationOutcomes.get(description);
+  if (outcome) return verificationPage(destination, env, outcome);
+  const origin = env.origin;
   const retry = '<a href="' + esc(retryPath(destination, origin)) + '">Try sign-in again</a>';
   const messages = {
     access_denied: ["Access not approved", "Onesa could not approve access for this sign-in. Check that your email is verified, your account is active, and the required product role has been assigned. If you believe this is a mistake, contact your Onesa administrator.", 403],
@@ -122,6 +146,11 @@ const retryPath = (destination, origin) => {
       )
     : "/login";
 };
+const verificationRetryPath = (destination, origin, action = "continue") => {
+  const retry = new URL(retryPath(destination, origin), origin);
+  retry.searchParams.set("email_verification", action);
+  return retry.pathname + retry.search;
+};
 const hidden = (key, value) =>
   '<input type="hidden" name="' + key + '" value="' + esc(value) + '">';
 const post = (path, csrf, body) =>
@@ -136,6 +165,35 @@ const options = (items, selected) =>
     (item === selected ? "<option selected>" : "<option>") + esc(item) + "</option>"
   ).join("");
 const mfaClaim = "https://onesa.eu/claims/mfa_time";
+async function sendVerificationEmail(verification, subject, accountClient) {
+  const options = {
+    method: "POST",
+    redirect: "error",
+    signal: AbortSignal.timeout(5000),
+  };
+  const response = await fetch(verification.origin + "/oauth/token", {
+    ...options,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "client_credentials",
+      audience: verification.origin + "/api/v2/",
+      scope: "update:users",
+      client_id: verification.clientId,
+      client_secret: verification.clientSecret,
+    }),
+  });
+  if (!response.ok) return false;
+  const { access_token, token_type } = await response.json();
+  if (typeof access_token !== "string" || !/^[A-Za-z0-9._~-]{16,16384}$/.test(access_token) ||
+      typeof token_type !== "string" || token_type.toLowerCase() !== "bearer")
+    return false;
+  const job = await fetch(verification.origin + "/api/v2/jobs/verification-email", {
+    ...options,
+    headers: { authorization: "Bearer " + access_token, "content-type": "application/json" },
+    body: JSON.stringify({ user_id: subject, client_id: accountClient }),
+  });
+  return job.ok;
+}
 export function authClient(env, transport) {
   let configured;
   async function get() {
@@ -229,6 +287,32 @@ export function createApp(store, env, client = authClient(env)) {
       store.one("SELECT id FROM accounts LIMIT 1");
       return Response.json({ service: "onesa-identity", ready: true });
     }
+    if (p === "/internal/email-verification" && method === "POST") {
+      if (!compare(req.headers.get("authorization"), "Bearer " + env.policyKey))
+        return new Response(null, { status: 401 });
+      const { subject, client: requester } = await req.json();
+      if (requester !== env.clientId || typeof subject !== "string" ||
+          !/^auth0\|[A-Za-z0-9_-]{1,128}$/.test(subject))
+        return new Response(null, { status: 403 });
+      if (!env.verification) return new Response(null, { status: 503 });
+      const account = store.lookup(env.issuer, subject);
+      if (account && ["suspended", "rejected"].includes(account.status))
+        return new Response(null, { status: 403 });
+      const now = Date.now();
+      const claimed = store.atomic(() => {
+        store.run("DELETE FROM verification_email_limit WHERE next<=?", now);
+        return store.run("INSERT OR IGNORE INTO verification_email_limit VALUES (?,?)",
+          digest(subject), now + 600000).changes;
+      });
+      if (!claimed) return new Response(null, { status: 429 });
+      try {
+        if (await sendVerificationEmail(env.verification, subject, env.clientId))
+          return new Response(null, { status: 202 });
+      } catch {
+        // Delivery is ambiguous after an upstream timeout. Retain the cooldown.
+      }
+      return new Response(null, { status: 503 });
+    }
     if (p === "/internal/decision" && method === "POST") {
       if (!compare(req.headers.get("authorization"), "Bearer " + env.policyKey))
         return new Response(null, { status: 401 });
@@ -278,11 +362,11 @@ export function createApp(store, env, client = authClient(env)) {
     }
     if (p === "/account/registration/resume" && method === "GET") {
       const resumes = browserResumes(req);
-      if (resumes.length === 1) return redirect(retryPath(resumes[0].destination, env.origin));
+      if (resumes.length === 1) return redirect(verificationRetryPath(resumes[0].destination, env.origin));
       if (resumes.length > 1) return page("Continue registration", "<ul>" + resumes.map(({ destination }) => {
         const target = new URL(destination, env.origin).searchParams;
         const label = accountProducts.get(target.get("product"))?.name + " · " + target.get("platform") + " · " + target.get("enrollment");
-        return '<li><a href="' + esc(retryPath(destination, env.origin)) + '">' + esc(label) + "</a></li>";
+        return '<li><a href="' + esc(verificationRetryPath(destination, env.origin)) + '">' + esc(label) + "</a></li>";
       }).join("") + "</ul>");
       return redirect("/account");
     }
@@ -336,7 +420,16 @@ export function createApp(store, env, client = authClient(env)) {
         code_challenge: await oidc.calculatePKCECodeChallenge(verifier),
         code_challenge_method: "S256",
       };
-      if (p === "/register") params.screen_hint = "signup";
+      if (p === "/register") {
+        params.screen_hint = "signup";
+        params.prompt = "login";
+      }
+      const emailVerification = p === "/login" ? url.searchParams.get("email_verification") : null;
+      if (emailVerification === "continue" || (emailVerification === "resend" && env.verification)) {
+        params.prompt = "login";
+        params.max_age = "0";
+        if (emailVerification === "resend") params.onesa_email_verification = "resend";
+      }
       if (p === "/step-up" || p === "/verify-factor") {
         params.prompt = "login";
         params.max_age = "0";
@@ -379,7 +472,7 @@ export function createApp(store, env, client = authClient(env)) {
           oauthError,
           url.searchParams.get("error_description") || "",
           flow.destination,
-          env.origin,
+          env,
         );
       let identity;
       try {
@@ -395,18 +488,18 @@ export function createApp(store, env, client = authClient(env)) {
         );
       }
       if (
-        identity?.iss !== env.issuer ||
-        identity.email_verified !== true ||
-        !identity.sub ||
-        typeof identity.sub !== "string"
+        identity?.iss !== env.issuer || typeof identity.sub !== "string" || !identity.sub ||
+        identity.sub.length > 512
       )
         return page(
-          "Verify your email",
-          'Use the verification message from Onesa Identity, then sign in again. <a href="' +
+          "Sign-in could not be completed",
+          'The identity provider returned an invalid response. <a href="' +
             esc(retryPath(flow.destination, env.origin)) +
-            '">Continue sign-in</a>',
-          403,
+            '">Try sign-in again</a>',
+          502,
         );
+      if (identity.email_verified !== true)
+        return verificationPage(flow.destination, env, "required");
       const target = new URL(flow.destination, env.origin);
       const product = target.searchParams.get("product");
       const destination = product && target.searchParams.has("enrollment") && returns.get(returnKey(product, target.searchParams.get("platform"),
