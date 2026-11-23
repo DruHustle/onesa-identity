@@ -6,7 +6,7 @@ const account = "https://account.onesa.eu";
 const provider = "https://auth.onesa.eu";
 const targets = registrationReturns(account);
 const products = [
-  ["onesa-company-portal", "portal", ["web"]],
+  ["onesa-portal", "portal", ["web"]],
   ["onesa-security", "security", ["web"]],
   ["onesa-documents", "internal-documents", ["web"]],
   ...[["smart-farmer","farmer"],["smart-logistics","logistics"],["smart-factory","factory"],
@@ -17,12 +17,12 @@ const cases = [
   ["onesa-identity", "Auth0 issuer", "issuer", provider + "/.well-known/openid-configuration"],
   ["onesa-identity", "Account UI", "account", account + "/account"],
   ["onesa-identity", "Account sign in", "authorize", account + "/login"],
-  ...products.flatMap(([repo,product,platforms]) =>
-    ["user","admin"].map(tier =>
-      [repo, "Account registration " + product + "/" + tier, "register",
-       account + "/register?" + new URLSearchParams({audience:tier, product, platform:"web"})])),
+  ...products.flatMap(([repo, product, platforms]) => platforms.flatMap(platform =>
+    ["user", "admin"].map(tier =>
+      [repo, `Account registration ${platform}/${tier}`, "register",
+       account + "/register?" + new URLSearchParams({ audience: tier, product, platform })]))),
   ...["user", "admin"].map(tier =>
-    ["onesa-company-portal", "Portal " + tier + " signup", "portal", "https://portal.onesa.eu/account/register?audience=" + tier]),
+      ["onesa-portal", "Portal " + tier + " signup", "portal", "https://portal.onesa.eu/account/register?audience=" + tier]),
   ["onesa-documents", "Public Docs", "page", "https://docs.onesa.eu/"],
   ["onesa-documents", "Internal Docs gate", "private", "https://docs.internal.onesa.eu/"],
   ...products.filter(([,product])=>product!=="portal"&&product!=="internal-documents")
@@ -69,8 +69,10 @@ async function probe([repo,surface,kind,url]) {
       accepted = [302,303].includes(response.status) && next?.origin === provider &&
         /\/authorize$/.test(next.pathname) &&
         next.searchParams.get("redirect_uri") === account + "/callback" &&
+        next.searchParams.get("response_type") === "code" &&
         next.searchParams.get("code_challenge_method") === "S256" &&
-        next.searchParams.has("state") && next.searchParams.has("nonce");
+        ["state", "nonce", "code_challenge"].every(key => Boolean(next.searchParams.get(key))) &&
+        (kind !== "register" || next.searchParams.get("screen_hint") === "signup");
       row.evidence = accepted ? "Auth0 Code + PKCE start; no account created" : "No approved Auth0 PKCE redirect";
      } else if (kind === "private") {
       accepted = [302,303,307,308,401,403].includes(response.status);
