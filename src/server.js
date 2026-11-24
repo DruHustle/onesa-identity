@@ -3,7 +3,33 @@ import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
 import { openStore, products, configurableAdminRoles } from "./store.js";
 import { createApp } from "./web.js";
-import { registrationReturns } from "./registration-returns.js";
+import { infrastructureEntry, registrationReturns, returnKey } from "./registration-returns.js";
+
+const hostname = url => url.hostname.replace(/\.$/, "");
+const productionIdentityHosts = ["account.onesa.eu", "auth.onesa.eu", "onesa.eu.auth0.com"];
+
+function stagingRegistrationReturns(issuer, account, override) {
+  const productionAccount = "https://account.onesa.eu";
+  const productionHosts = new Set([...productionIdentityHosts, "portainer.onesa.eu"]);
+  for (const target of registrationReturns(productionAccount).values()) {
+    const url = new URL(target);
+    if (url.protocol === "https:") productionHosts.add(hostname(url));
+  }
+  if (hostname(issuer) === hostname(account) ||
+      [issuer, account].some(url => productionHosts.has(hostname(url))))
+    throw Error("Staging requires separate nonproduction issuer and Account hosts");
+
+  const returns = registrationReturns(account.origin, override);
+  const landing = returns.get(returnKey("portal", "web", "admin", infrastructureEntry));
+  if (!landing || [hostname(issuer), hostname(account)].includes(hostname(new URL(landing))))
+    throw Error("Staging requires a separate Infrastructure registration landing");
+  for (const target of returns.values()) {
+    const url = new URL(target);
+    if (url.protocol !== "https:" || productionHosts.has(hostname(url)))
+      throw Error("Staging registration returns require nonproduction HTTPS hosts");
+  }
+  return returns;
+}
 
 export function configuration(env) {
   const required = (k) => {
@@ -20,6 +46,8 @@ export function configuration(env) {
   }
   const storeMode = env.IDENTITY_STORE_MODE ?? "create";
   if (!["create", "existing"].includes(storeMode)) throw Error("Invalid IDENTITY_STORE_MODE");
+  const isStaging = env.IDENTITY_ENVIRONMENT === "staging";
+  if (isStaging && storeMode !== "existing") throw Error("Staging requires a commissioned store");
   const issuer = new URL(required("OIDC_ISSUER")),
     origin = new URL(required("IDENTITY_ORIGIN"));
   for (const u of [issuer, origin])
@@ -32,6 +60,9 @@ export function configuration(env) {
       u.pathname !== "/"
     )
       throw Error("Expected HTTPS origin");
+  const returns = isStaging
+    ? stagingRegistrationReturns(issuer, origin, env.REGISTRATION_RETURNS_JSON)
+    : registrationReturns(origin.origin, env.REGISTRATION_RETURNS_JSON);
   const resources = new Map(),
     catalog = JSON.parse(required("RESOURCE_CLIENTS_JSON"));
   for (const [audience, resource] of Object.entries(catalog)) {
@@ -85,6 +116,8 @@ export function configuration(env) {
         management.password || management.search || management.hash ||
         verificationClientId === clientId)
       throw Error("Expected the Auth0 tenant origin and a separate email verification client");
+    if (isStaging && productionIdentityHosts.includes(hostname(management)))
+      throw Error("Staging requires a separate email verification tenant");
     verification = {
       origin: management.origin,
       clientId: verificationClientId,
@@ -98,7 +131,7 @@ export function configuration(env) {
     clientSecret: credential("OIDC_CLIENT_SECRET"),
     requireExistingStore: storeMode === "existing",
     resources,
-    registrationReturns: registrationReturns(origin.origin, env.REGISTRATION_RETURNS_JSON),
+    registrationReturns: returns,
     policyKey,
     connection: env.AUTH0_DATABASE_CONNECTION,
     auth0LogoutEnabled: env.AUTH0_LOGOUT_ENABLED === "true",

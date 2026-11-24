@@ -1,0 +1,49 @@
+name: onesa-identity-staging
+
+services:
+  identity:
+    image: "${IDENTITY_STAGE_IMAGE:?Set the reviewed commit-tagged staging Identity image}"
+    pull_policy: never
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      IDENTITY_ENVIRONMENT: staging
+      OIDC_ISSUER: "${IDENTITY_STAGE_ISSUER:?Set the separate staged HTTPS issuer}"
+      IDENTITY_ORIGIN: "${IDENTITY_STAGE_ORIGIN:?Set the staged Account HTTPS origin}"
+      OIDC_CLIENT_ID: "${IDENTITY_STAGE_CLIENT_ID:?Set the confidential staged Account client ID}"
+      OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      ACTION_POLICY_KEY_FILE: /run/secrets/action_policy_key
+      AUTH0_DATABASE_CONNECTION: "${IDENTITY_STAGE_DATABASE_CONNECTION:?Set the staged Auth0 database connection}"
+      AUTH0_LOGOUT_ENABLED: "${IDENTITY_STAGE_LOGOUT_ENABLED:-false}"
+      RESOURCE_CLIENTS_JSON: "${IDENTITY_STAGE_RESOURCE_CLIENTS_JSON:?Set only staged product audiences and clients}"
+      REGISTRATION_RETURNS_JSON: "${IDENTITY_STAGE_REGISTRATION_RETURNS_JSON:?Set the separate staged Infrastructure landing}"
+      IDENTITY_DATABASE: /data/identity.sqlite
+      IDENTITY_STORE_MODE: existing
+      PORT: "8080"
+    ports:
+      - "127.0.0.1:${IDENTITY_STAGE_HOST_PORT:-18601}:8080"
+    volumes:
+      - type: bind
+        source: "${IDENTITY_STAGE_VOLUME:?Set the separate commissioned staging data directory}"
+        target: /data
+        bind:
+          create_host_path: false
+    secrets:
+      - oidc_client_secret
+      - action_policy_key
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/readyz').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+secrets:
+  oidc_client_secret:
+    file: "${IDENTITY_STAGE_CLIENT_SECRET_PATH:?Set the private staged Account client secret path}"
+  action_policy_key:
+    file: "${IDENTITY_STAGE_POLICY_KEY_PATH:?Set the private staged Action policy key path}"
