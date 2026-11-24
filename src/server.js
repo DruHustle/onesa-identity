@@ -5,10 +5,12 @@ import { openStore, products, configurableAdminRoles } from "./store.js";
 import { createApp } from "./web.js";
 import { infrastructureEntry, registrationReturns, returnKey } from "./registration-returns.js";
 
+const hostname = url => url.hostname.replace(/\.$/, "");
+const productionIdentityHosts = ["account.onesa.eu", "auth.onesa.eu", "onesa.eu.auth0.com"];
+
 function stagingRegistrationReturns(issuer, account, override) {
   const productionAccount = "https://account.onesa.eu";
-  const hostname = url => url.hostname.replace(/\.$/, "");
-  const productionHosts = new Set(["account.onesa.eu", "auth.onesa.eu", "onesa.eu.auth0.com", "portainer.onesa.eu"]);
+  const productionHosts = new Set([...productionIdentityHosts, "portainer.onesa.eu"]);
   for (const target of registrationReturns(productionAccount).values()) {
     const url = new URL(target);
     if (url.protocol === "https:") productionHosts.add(hostname(url));
@@ -114,6 +116,8 @@ export function configuration(env) {
         management.password || management.search || management.hash ||
         verificationClientId === clientId)
       throw Error("Expected the Auth0 tenant origin and a separate email verification client");
+    if (isStaging && productionIdentityHosts.includes(hostname(management)))
+      throw Error("Staging requires a separate email verification tenant");
     verification = {
       origin: management.origin,
       clientId: verificationClientId,

@@ -204,6 +204,8 @@ test("Oracle staging requires a separate issuer, Account host, data store and da
     const registration = target.includes("it-infrastructure") ? registry(target) : registry(dashboard, target);
     assert.throws(() => configuration({...stage, REGISTRATION_RETURNS_JSON: registration}), /nonproduction HTTPS hosts/);
   }
+  assert.throws(() => configuration({...stage, AUTH0_VERIFICATION_ORIGIN: "https://onesa.eu.auth0.com",
+    AUTH0_VERIFICATION_CLIENT_ID: "stage-verification"}), /separate email verification tenant/);
 });
 
 async function fixture(t, overrides = {}) {
