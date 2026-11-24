@@ -187,6 +187,17 @@ test("Oracle staging requires a separate issuer, Account host, data store and da
   assert.equal(result.requireExistingStore, true);
   assert.equal(result.registrationReturns.get("portal/web/admin/infrastructure"), dashboard);
 
+  const hotspotRegistry = destination => JSON.stringify({
+    portal: { web: { infrastructure: dashboard } },
+    pasofi: { web: { "pasofi-hotspot": destination } },
+  });
+  const hotspot = "https://hotspot-staging.onesa.test/?registration=complete";
+  assert.equal(configuration({ ...stage, REGISTRATION_RETURNS_JSON: hotspotRegistry(hotspot) })
+    .registrationReturns.get("pasofi/web/user/pasofi-hotspot"), hotspot);
+  assert.throws(() => configuration({ ...stage, REGISTRATION_RETURNS_JSON: hotspotRegistry(
+    "https://hotspot.pasofi.mobile.onesa.eu.:8443/?registration=complete",
+  ) }), /nonproduction HTTPS hosts/);
+
   for (const invalid of [
     {OIDC_ISSUER: "https://auth.onesa.eu/"},
     {OIDC_ISSUER: "https://onesa.eu.auth0.com/"},
@@ -310,7 +321,7 @@ test("both registration types return to each registered product and platform wit
   const registry = registrationReturns("https://auth.onesa.eu");
   // Production Account and the Auth0 provider may use different origins.
   assert.deepEqual([...registrationReturns("https://account.onesa.eu")], [...registry]);
-  assert.equal(registry.size, 55);
+  assert.equal(registry.size, 56);
   assert.equal(registry.get("security/web/user"), "https://security.onesa.eu/?registration=complete");
   assert.equal(registry.get("security/web/admin"), "https://security.onesa.eu/?registration=complete");
   assert.equal(registry.get("portal/web/admin"), "https://portal.onesa.eu/account/registered?audience=admin");
@@ -318,7 +329,14 @@ test("both registration types return to each registered product and platform wit
   assert.equal(registry.get("portal/web/user"), "https://portal.onesa.eu/account/registered");
   assert.equal(registry.get("internal-documents/web/user"), "https://docs.internal.onesa.eu/registration/return");
   assert.equal(registry.get("farmer/ios/admin"), "smartfarmer://onesa/registered");
-  const { call, setRedeem } = await fixture(t, { registrationReturns: registry });
+  assert.equal(registry.get("pasofi/web/user"), "https://pasofi.mobile.onesa.eu/?registration=complete");
+  assert.equal(registry.get("pasofi/web/admin"), "https://pasofi.mobile.onesa.eu/?registration=complete");
+  assert.equal(registry.get("pasofi/ios/user"), "com.onesa.pasofi.identity://login/registered");
+  assert.equal(registry.get("pasofi/android/user"), "com.onesa.pasofi.identity://login/registered");
+  assert.equal(registry.get("pasofi/web/user/pasofi-hotspot"), "https://hotspot.pasofi.mobile.onesa.eu/?registration=complete");
+  const resources = new Map(env.resources);
+  resources.set("https://api.pasofi.onesa.test", { product: "pasofi", clients: ["pasofi-web"] });
+  const { call, setRedeem } = await fixture(t, { registrationReturns: registry, resources });
   setRedeem(async () => ({ iss: env.issuer, sub: "oidc|roundtrip", email: "verified@onesa.test", email_verified: true }));
   for (const [key, exactDestination] of registry) {
     const [product, platform, audience, entry] = key.split("/");
@@ -368,6 +386,41 @@ test("only the exact Portal web infrastructure landing can be configured", () =>
     const override = JSON.stringify({ [product]: { [platform]: { infrastructure: destination } } });
     assert.throws(() => registrationReturns(account, override));
   }
+});
+
+test("the PasoFi hotspot return accepts only the fixed web customer landing for each environment", async t => {
+  const account = "https://account.onesa.eu";
+  const production = "https://hotspot.pasofi.mobile.onesa.eu/?registration=complete";
+  const stage = "https://hotspot-staging.onesa.test/?registration=complete";
+  const registry = (destination, product = "pasofi", platform = "web") =>
+    JSON.stringify({ [product]: { [platform]: { "pasofi-hotspot": destination } } });
+  const key = returnKey("pasofi", "web", "user", "pasofi-hotspot");
+  assert.equal(registrationReturns(account, registry(production)).get(key), production);
+  assert.equal(registrationReturns(env.origin, registry(stage)).get(key), stage);
+  for (const invalid of [
+    registry(stage),
+    registry(production.replace("https://", "http://")),
+    registry(production.replace("/?", "/connect?")),
+    registry(production + "&return=other"),
+    registry(production + "#other"),
+    registry(production, "farmer"),
+    registry(production, "pasofi", "ios"),
+    registry(production, "pasofi", "android"),
+  ]) assert.throws(() => registrationReturns(account, invalid), /pasofi-hotspot landing/);
+  assert.throws(() => registrationReturns(env.origin, registry(production)), /pasofi-hotspot landing/);
+  assert.throws(() => registrationReturns(env.origin, registry(stage + "&state=fixture")), /pasofi-hotspot landing/);
+
+  const { call } = await fixture(t, { registrationReturns: registrationReturns(account) });
+  const entry = "/register?product=pasofi&platform=web&audience=user&entry=pasofi-hotspot";
+  const result = await call(entry);
+  assert.equal(result.status, 503, "an unconnected product cannot offer the captive signup entry");
+  for (const invalid of [
+    entry.replace("product=pasofi", "product=farmer"),
+    entry.replace("platform=web", "platform=ios"),
+    entry.replace("platform=web", "platform=android"),
+    entry.replace("audience=user", "audience=admin"),
+    entry + "&entry=pasofi-hotspot",
+  ]) assert.equal((await call(invalid)).status, 400, invalid);
 });
 
 test("a separate Account environment requires its own exact infrastructure landing", () => {

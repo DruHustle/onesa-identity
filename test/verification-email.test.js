@@ -4,22 +4,34 @@ import test from "node:test";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { calculatePKCECodeChallenge } from "openid-client";
 import { authClient, createApp } from "../src/web.js";
-import { openStore, registrations } from "../src/store.js";
-import { returnKey } from "../src/registration-returns.js";
+import { openStore, productAdministratorRequests, registrations } from "../src/store.js";
+import { registrationReturns, returnKey } from "../src/registration-returns.js";
 import preRegistration from "../auth0/pre-registration.cjs";
 import postLogin from "../auth0/post-login.cjs";
 
-test("fresh signup can recover a missing verification email and resume the originating product", async t => {
+test("fresh signup can recover a missing verification email and resume the originating product", t =>
+  verifyRegistration(t, {
+    product: "farmer", platform: "ios", role: "user",
+    productReturn: "farmer-fixture://registration/complete",
+  }));
+
+test("PasoFi hotspot resumes only in the initiating browser and returns after a signed verified customer signup", t =>
+  verifyRegistration(t, {
+    product: "pasofi", platform: "web", role: "customer", entry: "pasofi-hotspot",
+    productReturn: "https://hotspot.pasofi.mobile.onesa.eu/?registration=complete",
+  }));
+
+async function verifyRegistration(t, { product, platform, entry, role, productReturn }) {
   const issuer = "https://auth.onesa.test/";
   const origin = "https://account.onesa.test";
-  const productReturn = "farmer-fixture://registration/complete";
   const account = { subject: "auth0|verification-fixture", email: "verification@example.test", verified: false };
   const env = {
     issuer, origin, clientId: "account-client", clientSecret: "synthetic-account-secret",
     policyKey: "synthetic-policy-key",
     verification: { origin: "https://fixture.eu.auth0.com", clientId: "mail-client", clientSecret: "synthetic-mail-secret" },
-    registrationReturns: new Map([[returnKey("farmer", "ios", "user"), productReturn]]),
-    resources: new Map([["https://api.farmer.onesa.test", { product: "farmer", clients: ["farmer-web"] }]]),
+    registrationReturns: entry ? registrationReturns("https://account.onesa.eu") :
+      new Map([[returnKey(product, platform, "user"), productReturn]]),
+    resources: new Map([["https://api." + product + ".onesa.test", { product, clients: [product + "-web"] }]]),
   };
   const actionSecrets = { ACCOUNT_CLIENT_ID: env.clientId, POLICY_KEY: env.policyKey,
     POLICY_ORIGIN: origin, POLICY_URL: origin + "/internal/decision" };
@@ -110,7 +122,15 @@ test("fresh signup can recover a missing verification email and resume the origi
       authorizationCodes.set(code, query);
       callback.set("code", code);
     }
-    return visit("/callback?" + callback);
+    const path = "/callback?" + callback;
+    if (!entry || !callback.has("code")) return visit(path);
+
+    const differentBrowser = await app(new Request(origin + path));
+    assert.equal(differentBrowser.status, 400);
+    assert.ok(authorizationCodes.has(callback.get("code")), "a different browser cannot redeem the code");
+    const signedIn = await visit(path + "&product=portal&audience=admin&entry=infrastructure");
+    assert.equal((await visit(path)).status, 400, "the registration callback is single use");
+    return signedIn;
   }
   function link(html, label) {
     const href = html.match(new RegExp('href="([^"]+)">' + label + "</a>"))?.[1];
@@ -118,8 +138,16 @@ test("fresh signup can recover a missing verification email and resume the origi
     return href.replaceAll("&amp;", "&");
   }
 
-  const signup = await enterProvider("/register?product=farmer&platform=ios&audience=user");
+  const query = new URLSearchParams({ audience: "user", product, platform });
+  if (entry) {
+    query.set("entry", entry);
+    const directRetry = await visit("/login?" + query);
+    assert.equal(directRetry.status, 400);
+    assert.deepEqual(directRetry.headers.getSetCookie(), []);
+  }
+  const signup = await enterProvider("/register?" + query);
   assert.equal(signup.get("screen_hint"), "signup");
+  assert.equal(signup.has("entry"), false);
   const verification = await finishProvider(signup);
   assert.equal(verification.status, 403);
   assert.equal(mailbox.length, 0);
@@ -142,6 +170,7 @@ test("fresh signup can recover a missing verification email and resume the origi
   assert.equal(continueEntry.searchParams.get("email_verification"), "continue");
   const resumed = await visit("/account/registration/resume");
   assert.equal(resumed.status, 303);
+  assert.equal(new URL(resumed.headers.get("location"), origin).searchParams.get("entry"), entry ?? null);
   const continued = await enterProvider(resumed.headers.get("location"));
   assert.equal(continued.has("onesa_email_verification"), false);
   const signedIn = await finishProvider(continued);
@@ -150,6 +179,7 @@ test("fresh signup can recover a missing verification email and resume the origi
   assert.equal(cookies.has("__Host-onesa-session"), true);
   const registered = store.lookup(issuer, account.subject);
   assert.equal(registered.status, "active");
-  assert.equal(store.activeGrant(registered.id, "farmer").role, "user");
+  assert.equal(store.activeGrant(registered.id, product).role, role);
   assert.equal(registrations(store.db, registered.id).size, 0);
-});
+  assert.equal(productAdministratorRequests(store.db, registered.id).size, 0);
+}

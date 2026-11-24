@@ -1,5 +1,5 @@
 import * as oidc from "openid-client";
-import { infrastructureEntry, returnKey } from "./registration-returns.js";
+import { infrastructureEntry, isRegistrationEntry, pasofiHotspotEntry, returnKey } from "./registration-returns.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
   secret, digest, Rejected, products, accountProducts, registrations,
@@ -422,8 +422,9 @@ export function createApp(store, env, client = authClient(env)) {
       if (resumes.length === 1) return redirect(verificationRetryPath(resumes[0].destination, env.origin));
       if (resumes.length > 1) return page("Continue registration", "<ul>" + resumes.map(({ destination }) => {
         const target = new URL(destination, env.origin).searchParams;
-        const productName = target.get("entry") === infrastructureEntry
-          ? "IT Infrastructure Dashboard" : accountProducts.get(target.get("product"))?.name;
+        const entry = target.get("entry");
+        const productName = entry === infrastructureEntry ? "IT Infrastructure Dashboard"
+          : entry === pasofiHotspotEntry ? "PasoFi hotspot" : accountProducts.get(target.get("product"))?.name;
         const label = productName + " · " + target.get("platform") + " · " + target.get("enrollment");
         return '<li><a href="' + esc(verificationRetryPath(destination, env.origin)) + '">' + esc(label) + "</a></li>";
       }).join("") + "</ul>");
@@ -453,20 +454,22 @@ export function createApp(store, env, client = authClient(env)) {
       if (invitation && /^[\w-]{43}$/.test(invitation))
         destination = "/account?invite=" + invitation;
       const entry = url.searchParams.get("entry");
+      const hotspot = entry === pasofiHotspotEntry;
       if (p === "/register" || (p === "/login" && (url.searchParams.has("audience") || entry !== null))) {
         const tier = url.searchParams.get("audience") ?? "user";
         if (!["user", "admin"].includes(tier) || url.searchParams.getAll("audience").length > 1)
           return page("Choose a registration type", '<a href="/account">Return to Onesa Account</a>', 400);
-        const stored = new URL(destination, env.origin);
+        const stored = new URL(hotspot ? "/account" : destination, env.origin);
         stored.searchParams.set("enrollment", tier);
         if (url.searchParams.has("product") || url.searchParams.has("platform") || entry !== null) {
           const product = url.searchParams.get("product"), platform = url.searchParams.get("platform") ?? "web";
           if (!accountProducts.has(product) || !["web", "ios", "android"].includes(platform) ||
               url.searchParams.getAll("product").length !== 1 || url.searchParams.getAll("platform").length > 1 ||
-              (entry !== null && (entry !== infrastructureEntry || product !== "portal" || platform !== "web" ||
-                tier !== "admin" || url.searchParams.getAll("entry").length !== 1)))
+              (entry !== null && (url.searchParams.getAll("entry").length !== 1 ||
+                !isRegistrationEntry(product, platform, tier, entry))))
             return page("Unknown registration entry", '<a href="/account">Continue to Onesa Account</a>', 400);
-          if (!returns.has(returnKey(product, platform, tier, entry)))
+          if (!returns.has(returnKey(product, platform, tier, entry)) ||
+              (hotspot && !connectedProducts.has(product)))
             return page("Product registration unavailable", "The return to your product has not been configured.", 503);
           stored.searchParams.set("product", product);
           stored.searchParams.set("platform", platform);
@@ -504,19 +507,27 @@ export function createApp(store, env, client = authClient(env)) {
       // A first signup can wait for the inbox inside the hosted transaction.
       const flowSeconds = p === "/register" ? 900 : 300;
       const cookies = [cookie("flow", token, flowSeconds)];
-      store.atomic(() => {
+      const started = store.atomic(() => {
+        const productEnrollment = new URL(destination, env.origin).searchParams.has("product");
+        const resumes = productEnrollment ? browserResumes(req) : [];
+        // Resume the hotspot flow only in the browser holding its registration receipt.
+        if (hotspot && p === "/login" &&
+            !resumes.some(resume => resume.destination === destination))
+          return false;
         const now = Date.now();
         store.run("DELETE FROM challenges WHERE expires<=?", now);
         store.run("INSERT INTO challenges VALUES(?,?,?,?,?,?)",
           digest(token), state, nonce, verifier, destination, now + flowSeconds * 1000);
-        if (new URL(destination, env.origin).searchParams.has("product")) {
-          const resume = browserResumes(req).length ? readCookie(req, "registration") : secret();
+        if (productEnrollment) {
+          const resume = resumes.length ? readCookie(req, "registration") : secret();
           const browserHash = digest(resume);
           store.run("DELETE FROM registration_resumes WHERE expires<=? OR (hash=? AND destination=?)", now, browserHash, destination);
           store.run("INSERT INTO registration_resumes VALUES(?,?,?,?)", browserHash, state, destination, now + 86400000);
           cookies.push(cookie("flow-" + state, token, flowSeconds), cookie("registration", resume, 86400));
         }
+        return true;
       });
+      if (!started) return page("Start PasoFi hotspot registration", "Open registration from the PasoFi hotspot to continue.", 400);
       return redirect(location, cookies);
     }
     if (p === "/callback" && method === "GET") {
