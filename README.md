@@ -14,6 +14,12 @@ Set `IDENTITY_ORIGIN` to the browser’s actual HTTPS account origin and registe
 
 Use `docker compose --env-file /etc/onesa/identity/production.env -f deploy/compose.oracle.yaml up -d --wait` to launch. Check `/readyz` on the reserved loopback port before connecting the existing TLS ingress. Route the account application’s own GET and POST paths, including `/account/access`, `/account/enrollment`, `/account/recovery`, `/admin/change` and `/admin/invite`, to this service. Keep Auth0 authorization, token, discovery, provider callbacks and hosted login pages with Auth0. The Compose definition publishes only to loopback; it does not modify DNS, route the custom domain or enable Auth0 Actions.
 
+### Isolated Infrastructure staging
+
+Use `deploy/compose.oracle.staging.yaml` on its own with the reviewed image and a private staging environment file. The project is `onesa-identity-staging` and its reserved default bind is `127.0.0.1:18601`. Commission a separate SQLite store with synthetic records. Check the store directory and both file-backed keys resolve only to the staging locations before using `docker compose --env-file "$IDENTITY_STAGE_ENV_FILE" -f deploy/compose.oracle.staging.yaml up -d --wait`. Keep the production service running independently.
+
+Set the staging issuer, Account host, confidential Account client, database connection, and resource registry with the `IDENTITY_STAGE_*` variables in the Compose file. The app rejects the production Identity hosts, production registration destinations, and any configuration without a separate HTTPS Infrastructure landing. Set `IDENTITY_STAGE_REGISTRATION_RETURNS_JSON` to a registry containing `portal.web.infrastructure` for the paired dashboard's exact `/access-requested` URL. Use that stage Account's exact `/callback` and `/account/registration/resume` on its separate tenant client. Enable `IDENTITY_STAGE_LOGOUT_ENABLED` only once that client allows the exact staged Account origin as its logout return. Verify `/readyz` locally before connecting the protected staged route.
+
 ## Tenant and routing
 
 Account sign-out always removes the local session. Set `AUTH0_LOGOUT_ENABLED=true` after the dedicated Auth0 Account application allows the exact `IDENTITY_ORIGIN` as a logout return URL. With this setting the browser continues to Auth0 and returns to Account after ending its SSO session.

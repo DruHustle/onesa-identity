@@ -165,6 +165,47 @@ test("resource registry rejects missing, non-HTTPS and ambiguous audiences", () 
   );
 });
 
+test("Oracle staging requires a separate issuer, Account host, data store and dashboard return", () => {
+  const issuer = "https://auth-staging.onesa.test/";
+  const account = "https://account-staging.onesa.test";
+  const dashboard = "https://infra-staging.onesa.test/access-requested";
+  const registry = (infrastructure, user) => JSON.stringify({portal: {web: {infrastructure, user}}});
+  const stage = {
+    IDENTITY_ENVIRONMENT: "staging",
+    IDENTITY_STORE_MODE: "existing",
+    OIDC_ISSUER: issuer,
+    IDENTITY_ORIGIN: account,
+    OIDC_CLIENT_ID: "stage-account",
+    OIDC_CLIENT_SECRET: "synthetic-stage-client-secret",
+    ACTION_POLICY_KEY: "b".repeat(32),
+    RESOURCE_CLIENTS_JSON: '{"https://portal-api-staging.onesa.test":{"product":"portal","clients":["stage-dashboard"]}}',
+    REGISTRATION_RETURNS_JSON: registry(dashboard),
+  };
+  const result = configuration(stage);
+  assert.equal(result.issuer, issuer);
+  assert.equal(result.origin, account);
+  assert.equal(result.requireExistingStore, true);
+  assert.equal(result.registrationReturns.get("portal/web/admin/infrastructure"), dashboard);
+
+  for (const invalid of [
+    {OIDC_ISSUER: "https://auth.onesa.eu/"},
+    {OIDC_ISSUER: "https://onesa.eu.auth0.com/"},
+    {OIDC_ISSUER: "https://auth.onesa.eu.:8443/"},
+    {IDENTITY_ORIGIN: "https://account.onesa.eu"},
+    {IDENTITY_ORIGIN: issuer},
+  ]) {
+    assert.throws(() => configuration({...stage, ...invalid}), /separate nonproduction issuer and Account/);
+  }
+  assert.throws(() => configuration({...stage, IDENTITY_STORE_MODE: "create"}), /commissioned store/);
+  for (const returnValue of [undefined, registry(account + "/access-requested"), registry(issuer + "access-requested")]) {
+    assert.throws(() => configuration({...stage, REGISTRATION_RETURNS_JSON: returnValue}), /separate Infrastructure registration landing/);
+  }
+  for (const target of ["https://portal.onesa.eu/account/registered", "https://it-infrastructure.onesa.eu.:8443/access-requested"]) {
+    const registration = target.includes("it-infrastructure") ? registry(target) : registry(dashboard, target);
+    assert.throws(() => configuration({...stage, REGISTRATION_RETURNS_JSON: registration}), /nonproduction HTTPS hosts/);
+  }
+});
+
 async function fixture(t, overrides = {}) {
   const store = openStore(":memory:");
   t.after(() => store.db.close());
