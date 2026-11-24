@@ -1,5 +1,8 @@
 import { accountProducts } from "./store.js";
 
+export const infrastructureEntry = "infrastructure";
+const infrastructureReturn = "https://it-infrastructure.onesa.eu/access-requested";
+
 const productsWithApps = {
   ai:       ["https://platform.onesa.eu/auth/continue?registration=complete", "onesaai://account/registered"],
   drone:    ["https://drone.onesa.eu/?registration=complete", "onesadrone://account/registered"],
@@ -13,8 +16,13 @@ const productsWithApps = {
 
 const production = Object.fromEntries(Object.entries(productsWithApps).map(([product, [web, app]]) =>
   [product, { web, ios: app, android: app }]));
-production.portal = { web: { user: "https://portal.onesa.eu/account/registered",
-  admin: "https://portal.onesa.eu/account/registered?audience=admin" } };
+production.portal = {
+  web: {
+    user: "https://portal.onesa.eu/account/registered",
+    admin: "https://portal.onesa.eu/account/registered?audience=admin",
+    [infrastructureEntry]: infrastructureReturn,
+  },
+};
 production["internal-documents"] = { web: "https://docs.internal.onesa.eu/registration/return" };
 // Security is web-only and requires an explicit Identity grant and a separate
 // organization membership; it does not inherit shared user/admin access.
@@ -25,9 +33,11 @@ production.security = { web: "https://security.onesa.eu/?registration=complete" 
 const productionAccountOrigins = new Set(["https://account.onesa.eu", "https://auth.onesa.eu"]);
 
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
-export const returnKey = (product, platform, tier) => [product, platform, tier].join("/");
+export const returnKey = (product, platform, tier, entry = null) =>
+  entry === null ? [product, platform, tier].join("/") : [product, platform, tier, entry].join("/");
 export function registrationReturns(origin, override) {
-  const entries = override ? JSON.parse(override) : productionAccountOrigins.has(origin) ? production : {};
+  const isProduction = productionAccountOrigins.has(origin);
+  const entries = override ? JSON.parse(override) : isProduction ? production : {};
   if (!object(entries)) throw Error("Invalid registration return registry");
   const results = new Map();
   for (const [product, platforms] of Object.entries(entries)) {
@@ -38,6 +48,15 @@ export function registrationReturns(origin, override) {
       const tiers = typeof target === "string" ? { user: target, admin: target } : target;
       if (!object(tiers)) throw Error("Invalid registration return destinations");
       for (const [tier, raw] of Object.entries(tiers)) {
+        if (tier === infrastructureEntry) {
+          const url = typeof raw === "string" ? new URL(raw) : null;
+          const usesProductionLanding = raw === infrastructureReturn;
+          if (product !== "portal" || platform !== "web" || !url || url.protocol !== "https:" ||
+              raw !== url.origin + "/access-requested" || isProduction !== usesProductionLanding)
+            throw Error("Expected the registered infrastructure landing");
+          results.set(returnKey(product, platform, "admin", infrastructureEntry), raw);
+          continue;
+        }
         if (!["user", "admin"].includes(tier) || typeof raw !== "string" || raw.trim() !== raw)
           throw Error("Invalid registration return destination");
         const url = new URL(raw);

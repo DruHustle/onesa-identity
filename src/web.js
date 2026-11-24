@@ -1,5 +1,5 @@
 import * as oidc from "openid-client";
-import { returnKey } from "./registration-returns.js";
+import { infrastructureEntry, returnKey } from "./registration-returns.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
   secret, digest, Rejected, products, accountProducts, registrations,
@@ -151,7 +151,7 @@ const retryPath = (destination, origin) => {
   const tier = target.searchParams.get("enrollment");
   if (tier === "admin" || tier === "user") {
     const query = new URLSearchParams({ audience: tier });
-    for (const key of ["invite", "product", "platform"])
+    for (const key of ["invite", "product", "platform", "entry"])
       if (target.searchParams.has(key)) query.set(key, target.searchParams.get(key));
     return "/login?" + query;
   }
@@ -422,7 +422,9 @@ export function createApp(store, env, client = authClient(env)) {
       if (resumes.length === 1) return redirect(verificationRetryPath(resumes[0].destination, env.origin));
       if (resumes.length > 1) return page("Continue registration", "<ul>" + resumes.map(({ destination }) => {
         const target = new URL(destination, env.origin).searchParams;
-        const label = accountProducts.get(target.get("product"))?.name + " · " + target.get("platform") + " · " + target.get("enrollment");
+        const productName = target.get("entry") === infrastructureEntry
+          ? "IT Infrastructure Dashboard" : accountProducts.get(target.get("product"))?.name;
+        const label = productName + " · " + target.get("platform") + " · " + target.get("enrollment");
         return '<li><a href="' + esc(verificationRetryPath(destination, env.origin)) + '">' + esc(label) + "</a></li>";
       }).join("") + "</ul>");
       return redirect("/account");
@@ -450,21 +452,25 @@ export function createApp(store, env, client = authClient(env)) {
       const invitation = url.searchParams.get("invite");
       if (invitation && /^[\w-]{43}$/.test(invitation))
         destination = "/account?invite=" + invitation;
-      if (p === "/register" || (p === "/login" && url.searchParams.has("audience"))) {
+      const entry = url.searchParams.get("entry");
+      if (p === "/register" || (p === "/login" && (url.searchParams.has("audience") || entry !== null))) {
         const tier = url.searchParams.get("audience") ?? "user";
         if (!["user", "admin"].includes(tier) || url.searchParams.getAll("audience").length > 1)
           return page("Choose a registration type", '<a href="/account">Return to Onesa Account</a>', 400);
         const stored = new URL(destination, env.origin);
         stored.searchParams.set("enrollment", tier);
-        if (url.searchParams.has("product") || url.searchParams.has("platform")) {
+        if (url.searchParams.has("product") || url.searchParams.has("platform") || entry !== null) {
           const product = url.searchParams.get("product"), platform = url.searchParams.get("platform") ?? "web";
           if (!accountProducts.has(product) || !["web", "ios", "android"].includes(platform) ||
-              url.searchParams.getAll("product").length !== 1 || url.searchParams.getAll("platform").length > 1)
+              url.searchParams.getAll("product").length !== 1 || url.searchParams.getAll("platform").length > 1 ||
+              (entry !== null && (entry !== infrastructureEntry || product !== "portal" || platform !== "web" ||
+                tier !== "admin" || url.searchParams.getAll("entry").length !== 1)))
             return page("Unknown registration entry", '<a href="/account">Continue to Onesa Account</a>', 400);
-          if (!returns.has(returnKey(product, platform, tier)))
+          if (!returns.has(returnKey(product, platform, tier, entry)))
             return page("Product registration unavailable", "The return to your product has not been configured.", 503);
           stored.searchParams.set("product", product);
           stored.searchParams.set("platform", platform);
+          if (entry !== null) stored.searchParams.set("entry", entry);
         }
         destination = stored.pathname + stored.search;
       }
@@ -564,7 +570,9 @@ export function createApp(store, env, client = authClient(env)) {
       const target = new URL(flow.destination, env.origin);
       const product = target.searchParams.get("product");
       const tier = target.searchParams.get("enrollment");
-      const destination = product && tier && returns.get(returnKey(product, target.searchParams.get("platform"), tier));
+      const destination = product && tier && returns.get(returnKey(
+        product, target.searchParams.get("platform"), tier, target.searchParams.get("entry"),
+      ));
       if (product && tier && !destination)
         return page("Product registration unavailable", "The product return is no longer configured.", 503);
       const user = store.register(

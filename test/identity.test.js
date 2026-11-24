@@ -267,24 +267,27 @@ test("both registration types return to each registered product and platform wit
   const registry = registrationReturns("https://auth.onesa.eu");
   // Production Account and the Auth0 provider may use different origins.
   assert.deepEqual([...registrationReturns("https://account.onesa.eu")], [...registry]);
-  assert.equal(registry.size, 54);
+  assert.equal(registry.size, 55);
   assert.equal(registry.get("security/web/user"), "https://security.onesa.eu/?registration=complete");
   assert.equal(registry.get("security/web/admin"), "https://security.onesa.eu/?registration=complete");
   assert.equal(registry.get("portal/web/admin"), "https://portal.onesa.eu/account/registered?audience=admin");
+  assert.equal(registry.get("portal/web/admin/infrastructure"), "https://it-infrastructure.onesa.eu/access-requested");
   assert.equal(registry.get("portal/web/user"), "https://portal.onesa.eu/account/registered");
   assert.equal(registry.get("internal-documents/web/user"), "https://docs.internal.onesa.eu/registration/return");
   assert.equal(registry.get("farmer/ios/admin"), "smartfarmer://onesa/registered");
   const { call, setRedeem } = await fixture(t, { registrationReturns: registry });
   setRedeem(async () => ({ iss: env.issuer, sub: "oidc|roundtrip", email: "verified@onesa.test", email_verified: true }));
   for (const [key, exactDestination] of registry) {
-    const [product, platform, audience] = key.split("/");
+    const [product, platform, audience, entry] = key.split("/");
     const query = new URLSearchParams({ product, platform, audience, return_to: "https://different.test/" });
+    if (entry) query.set("entry", entry);
     const start = await call("/register?" + query);
     assert.equal(start.status, 303, key);
     const auth = new URL(start.headers.get("location"));
     assert.equal(auth.searchParams.get("redirect_uri"), env.origin + "/callback");
     assert.equal(auth.searchParams.get("code_challenge_method"), "S256");
     assert.equal(auth.searchParams.get("product"), null);
+    assert.equal(auth.searchParams.get("entry"), null);
     const cookies = start.headers.getSetCookie().map(c => c.split(";")[0]).join("; ");
     const done = await call("/callback?code=fixture&state=" + auth.searchParams.get("state"), "GET", undefined, { cookie: cookies });
     assert.equal(done.status, 303, key);
@@ -304,6 +307,112 @@ test("both registration types return to each registered product and platform wit
       ["ios", "smartfarmer://onesa/registered#override"], ["ios", "https://attacker.onesa.test/registered"],
       ["web", "https://pilot.onesa.test/entry?code=fixture"]])
     assert.throws(() => registrationReturns(env.origin, JSON.stringify({ farmer: { [platform]: invalid } })));
+});
+
+test("only the exact Portal web infrastructure landing can be configured", () => {
+  const account = "https://account.onesa.eu";
+  const landing = "https://it-infrastructure.onesa.eu/access-requested";
+  const approved = JSON.stringify({ portal: { web: { infrastructure: landing } } });
+  assert.equal(registrationReturns(account, approved).get("portal/web/admin/infrastructure"), landing);
+  for (const [product, platform, destination] of [
+    ["portal", "web", "https://other.onesa.test/access-requested"],
+    ["portal", "web", landing + "?return=/"],
+    ["portal", "web", landing + "#return"],
+    ["portal", "web", "https://it-infrastructure.onesa.eu/callback"],
+    ["farmer", "web", landing],
+    ["portal", "ios", landing],
+  ]) {
+    const override = JSON.stringify({ [product]: { [platform]: { infrastructure: destination } } });
+    assert.throws(() => registrationReturns(account, override));
+  }
+});
+
+test("a separate Account environment requires its own exact infrastructure landing", () => {
+  const configured = destination => JSON.stringify({ portal: { web: { infrastructure: destination } } });
+  const stage = "https://infrastructure-staging.onesa.test/access-requested";
+  assert.equal(registrationReturns(env.origin, configured(stage)).get("portal/web/admin/infrastructure"), stage);
+  for (const invalid of [
+    "https://it-infrastructure.onesa.eu/access-requested",
+    "http://infrastructure-staging.onesa.test/access-requested",
+    stage + "?",
+    stage + "#",
+    stage + "/",
+    stage.replace("https://", "https://person@"),
+  ]) assert.throws(() => registrationReturns(env.origin, configured(invalid)));
+});
+
+test("infrastructure signup resumes after verified email and requests only pending Portal administrator access", async t => {
+  const audience = "https://api.portal.onesa.test";
+  const client = "infrastructure-client";
+  const resources = new Map(env.resources);
+  resources.set(audience, { product: "portal", clients: [client] });
+  const { call, store, setRedeem } = await fixture(t, {
+    resources, registrationReturns: registrationReturns("https://account.onesa.eu"), verification: {},
+  });
+  const portal = "/register?product=portal&audience=admin&platform=web";
+  const infrastructure = portal + "&entry=infrastructure";
+  for (const path of [
+    portal + "&entry=",
+    portal + "&entry=https%3A%2F%2Fother.onesa.test",
+    infrastructure + "&entry=infrastructure",
+    "/register?product=portal&audience=user&entry=infrastructure",
+    "/register?product=portal&audience=admin&platform=ios&entry=infrastructure",
+    "/register?product=farmer&audience=admin&entry=infrastructure",
+    "/register?audience=admin&entry=infrastructure",
+    "/login?entry=infrastructure",
+  ]) {
+    const rejected = await call(path);
+    assert.equal(rejected.status, 400, path);
+    assert.equal(rejected.headers.has("set-cookie"), false, path);
+  }
+
+  const jar = new Map();
+  async function visit(path) {
+    const response = await call(path, "GET", undefined, { cookie: [...jar.values()].join("; ") });
+    for (const header of response.headers.getSetCookie()) {
+      const pair = header.split(";")[0];
+      const key = pair.slice(0, pair.indexOf("="));
+      if (header.includes("Max-Age=0")) jar.delete(key);
+      else jar.set(key, pair);
+    }
+    return response;
+  }
+  async function start(path) {
+    const response = await visit(path);
+    assert.equal(response.status, 303);
+    return new URL(response.headers.get("location")).searchParams.get("state");
+  }
+  const callback = state => visit("/callback?code=fixture&state=" + state);
+  const applicant = { iss: env.issuer, sub: "oidc|infrastructure-applicant", email: "infrastructure@onesa.test" };
+  setRedeem(async () => ({ ...applicant, email_verified: false }));
+  const beforeVerification = await start(infrastructure);
+  const unverified = await callback(beforeVerification);
+  assert.equal(unverified.status, 403);
+  assert.match(await unverified.text(), /entry=infrastructure&amp;email_verification=resend/);
+  assert.equal(store.lookup(env.issuer, applicant.sub), undefined);
+
+  const resumePath = "/account/registration/resume";
+  const continuePath = "/login?audience=admin&product=portal&platform=web&entry=infrastructure&email_verification=continue";
+  assert.equal((await visit(resumePath)).headers.get("location"), continuePath);
+  const portalState = await start(portal);
+  const choices = await (await visit(resumePath)).text();
+  assert.match(choices, /IT Infrastructure Dashboard · web · admin/);
+  assert.match(choices, /Company Portal · web · admin/);
+  const resumeState = await start(continuePath);
+  setRedeem(async () => ({ ...applicant, email_verified: true }));
+  assert.equal((await callback(resumeState)).headers.get("location"), "https://it-infrastructure.onesa.eu/access-requested");
+  const account = store.lookup(env.issuer, applicant.sub);
+  assert.equal(account.status, "pending");
+  assert.deepEqual([...productAdministratorRequests(store.db, account.id)], [["portal", "pending"]]);
+  assert.equal(registrations(store.db, account.id).size, 0);
+  assert.equal(store.activeProductAdministrator(account.id, "portal"), undefined);
+  assert.equal(store.activeGrant(account.id, "portal"), undefined);
+  const decision = await call("/internal/decision", "POST", JSON.stringify({ subject: applicant.sub, audience, client }),
+    { authorization: "Bearer " + env.policyKey });
+  assert.equal(decision.status, 403);
+  assert.equal((await callback(portalState)).headers.get("location"), "https://portal.onesa.eu/account/registered?audience=admin");
+  assert.equal(store.lookup(env.issuer, applicant.sub).revision, account.revision);
+  assert.equal((await visit(resumePath)).headers.get("location"), "/account");
 });
 
 test("verification and expired login retry resume the original product across two open registration tabs", async t => {
