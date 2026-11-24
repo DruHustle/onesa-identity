@@ -236,6 +236,7 @@ test("the Onesa Account entry preserves invitations for sign-in and registration
     assert.equal(location.searchParams.get("screen_hint"), hint);
     assert.equal(location.searchParams.get("code_challenge_method"), "S256");
     assert.equal(location.searchParams.get("redirect_uri"), env.origin + "/callback");
+    assert.match(start.headers.getSetCookie()[0], path === "/register" ? /Max-Age=900$/ : /Max-Age=300$/);
   }
 });
 
@@ -307,7 +308,11 @@ test("both registration types return to each registered product and platform wit
 
 test("verification and expired login retry resume the original product across two open registration tabs", async t => {
   const registry = registrationReturns("https://auth.onesa.eu");
-  const { call, store, setRedeem } = await fixture(t, { registrationReturns: registry });
+  const { call, store, setRedeem } = await fixture(t, {
+    registrationReturns: registry, connection: "Onesa-Database",
+  });
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
   const jar = new Map();
   function remember(response) {
     for (const header of response.headers.getSetCookie()) {
@@ -325,7 +330,12 @@ test("verification and expired login retry resume the original product across tw
   const start = async path => new URL((await visit(path)).headers.get("location")).searchParams.get("state");
   const signIn = state => visit("/callback?code=fixture&state=" + state);
   const farmer = await start("/register?product=farmer&platform=ios&audience=admin");
-  const drone = await start("/register?product=drone");
+  const registration = await visit("/register?product=drone");
+  const authorize = new URL(registration.headers.get("location"));
+  const drone = authorize.searchParams.get("state");
+  assert.equal(authorize.searchParams.get("connection"), "Onesa-Database");
+  assert.ok(registration.headers.getSetCookie().some(header =>
+    header.startsWith("__Host-onesa-flow-" + drone + "=") && header.endsWith("Max-Age=900")));
   const chooser = await visit("/account/registration/resume");
   assert.equal(chooser.status, 200);
   const choices = await chooser.text();
@@ -336,6 +346,7 @@ test("verification and expired login retry resume the original product across tw
   assert.equal(verify.status, 403);
   assert.match(await verify.text(), /audience=admin&amp;product=farmer&amp;platform=ios/);
   setRedeem(async () => ({ iss: env.issuer, sub: "oidc|pilot", email: "pilot@onesa.test", email_verified: true }));
+  now += 7 * 60 * 1000;
   assert.equal((await signIn(drone)).headers.get("location"), registry.get("drone/web/user"));
   const resumed = await visit("/account/registration/resume?iss=" + encodeURIComponent(env.issuer));
   assert.equal(resumed.headers.get("location"), "/login?audience=admin&product=farmer&platform=ios&email_verification=continue");

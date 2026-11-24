@@ -480,6 +480,7 @@ export function createApp(store, env, client = authClient(env)) {
       if (p === "/register") {
         params.screen_hint = "signup";
         params.prompt = "login";
+        if (env.connection) params.connection = env.connection;
       }
       const emailVerification = p === "/login" ? url.searchParams.get("email_verification") : null;
       if (emailVerification === "continue" || (emailVerification === "resend" && env.verification)) {
@@ -494,17 +495,20 @@ export function createApp(store, env, client = authClient(env)) {
           "http://schemas.openid.net/pape/policies/2007/06/multi-factor";
       }
       const location = await client.authorize(params);
-      const cookies = [cookie("flow", token, 300)];
+      // A first signup can wait for the inbox inside the hosted transaction.
+      const flowSeconds = p === "/register" ? 900 : 300;
+      const cookies = [cookie("flow", token, flowSeconds)];
       store.atomic(() => {
         const now = Date.now();
         store.run("DELETE FROM challenges WHERE expires<=?", now);
-        store.run("INSERT INTO challenges VALUES(?,?,?,?,?,?)", digest(token), state, nonce, verifier, destination, now + 300000);
+        store.run("INSERT INTO challenges VALUES(?,?,?,?,?,?)",
+          digest(token), state, nonce, verifier, destination, now + flowSeconds * 1000);
         if (new URL(destination, env.origin).searchParams.has("product")) {
           const resume = browserResumes(req).length ? readCookie(req, "registration") : secret();
           const browserHash = digest(resume);
           store.run("DELETE FROM registration_resumes WHERE expires<=? OR (hash=? AND destination=?)", now, browserHash, destination);
           store.run("INSERT INTO registration_resumes VALUES(?,?,?,?)", browserHash, state, destination, now + 86400000);
-          cookies.push(cookie("flow-" + state, token, 300), cookie("registration", resume, 86400));
+          cookies.push(cookie("flow-" + state, token, flowSeconds), cookie("registration", resume, 86400));
         }
       });
       return redirect(location, cookies);
