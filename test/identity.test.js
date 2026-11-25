@@ -1211,7 +1211,7 @@ test("active Onesa administrators can enroll and verify a local authenticator af
   const setup = await call(path, "GET", undefined, headers);
   assert.equal(setup.status, 200);
   assert.equal(setup.headers.get("cache-control"), "no-store");
-  assert.equal(setup.headers.get("referrer-policy"), "no-referrer");
+  assert.equal(setup.headers.get("referrer-policy"), "same-origin");
   assert.match(setup.headers.get("content-security-policy"), /img-src [^;]* data:/);
   const html = await setup.text();
   assert.match(html, /src="data:image\/gif;base64,[A-Za-z0-9+/]+=*" alt="Onesa authenticator setup QR code"/);
@@ -1223,6 +1223,7 @@ test("active Onesa administrators can enroll and verify a local authenticator af
   const code = authenticatorCode(raw, Math.floor(Date.now() / 30000));
   const form = new URLSearchParams({ csrf, code }).toString();
   assert.equal((await call(path, "POST", form, { ...headers, origin: "https://untrusted.test" })).status, 403);
+  assert.equal((await call(path, "POST", form, { ...headers, origin: "null" })).status, 403);
   const valid = await call(path, "POST", form, headers);
   assert.equal(valid.headers.get("location"), scope);
   assert.ok(valid.headers.getSetCookie().some(value => value.startsWith("__Host-onesa-authenticator=;")));
@@ -1254,16 +1255,20 @@ test("active Onesa administrators can enroll and verify a local authenticator af
   const entry = staffPath + "?ticket=" + ticket + "&state=" + state;
   const bound = await call(entry);
   assert.equal(bound.headers.get("location"),staffPath);
+  assert.equal(bound.headers.get("referrer-policy"),"no-referrer");
   assert.equal((await call(entry)).status,400);
   const staffCookie = bound.headers.getSetCookie()[0].split(";")[0];
   const staffHeaders = {cookie:staffCookie,origin:env.origin};
-  const staffPage = await (await call(staffPath,"GET",undefined,staffHeaders)).text();
+  const staffResponse = await call(staffPath,"GET",undefined,staffHeaders);
+  assert.equal(staffResponse.headers.get("referrer-policy"),"same-origin");
+  const staffPage = await staffResponse.text();
   assert.match(staffPage,/Verify PasoFi staff sign-in/);
   assert.doesNotMatch(staffPage,/Authenticator setup key/);
   const staffCsrf = staffPage.match(/name="csrf" value="([^"]+)"/)[1];
   const next = authenticatorCode(raw,stored.last_counter+1);
   const verified = await call(staffPath,"POST",new URLSearchParams({csrf:staffCsrf,code:next}).toString(),staffHeaders);
   assert.equal(verified.status,200);
+  assert.equal(verified.headers.get("referrer-policy"),"no-referrer");
   const result = await verified.text();
   assert.ok(result.includes('action="' + new URL("/continue?state="+state,env.issuer).href + '"'));
   const receipt = result.match(/name="onesa_factor_receipt" value="([^"]+)"/)[1];

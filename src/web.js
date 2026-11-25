@@ -459,6 +459,7 @@ export function createApp(store, env, client = authClient(env)) {
             '<form method="post" action="' + esc(next.href) + '">' +
             hidden("state", outcome.state) + hidden("onesa_factor_receipt", outcome.receipt) +
             '<button class="primary">Continue to PasoFi Staff</button></form>');
+          response.headers.set("referrer-policy", "no-referrer");
           response.headers.append("set-cookie", cookie("pasofi-authenticator", "", 0));
           return response;
         }
@@ -1229,10 +1230,13 @@ export function createApp(store, env, client = authClient(env)) {
       }
     }
     response.headers.set("cache-control", "no-store");
-    const pathname = new URL(req.url).pathname;
-    const staffVerification = pathname === pasoFiFactorPath;
-    const accountVerification = pathname === "/account/authenticator";
-    response.headers.set("referrer-policy", staffVerification || accountVerification ? "no-referrer" : "same-origin");
+    const requestUrl = new URL(req.url);
+    const staffVerification = requestUrl.pathname === pasoFiFactorPath;
+    const accountVerification = requestUrl.pathname === "/account/authenticator";
+    if (!response.headers.has("referrer-policy")) {
+      const staffEntry = staffVerification && requestUrl.searchParams.has("ticket");
+      response.headers.set("referrer-policy", staffEntry ? "no-referrer" : "same-origin");
+    }
     response.headers.set("x-content-type-options", "nosniff");
     response.headers.set(
       "content-security-policy",
