@@ -79,6 +79,50 @@ const page = (title, body, status = 200, wide = false, administration = false) =
       .authenticator-verification label { margin: 0; gap: .375rem; font-weight: 600; }
       .authenticator-verification input { width: 100%; font-variant-numeric: tabular-nums; }
       .authenticator-verification button { width: 100%; justify-content: center; font-weight: 700; }
+      .identity-admin { display: grid; gap: 1.5rem; }
+      .identity-admin h2 { margin: 0 0 .65rem; color: #102B29; }
+      .identity-admin h3 { margin: 0 0 .5rem; color: #102B29; font-size: 1rem; }
+      .identity-admin label { min-width: 0; margin: 0; gap: .35rem; font-weight: 600; }
+      .identity-admin :is(input, select) { width: 100%; }
+      .identity-admin button { font-weight: 600; }
+      .admin-toolbar { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); align-items: start; gap: 1rem; }
+      .admin-form form, .admin-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .65rem; }
+      .admin-panel, .admin-account { border: 1px solid #D9E6E1; border-radius: 12px; background: #FBFDFC; }
+      .identity-admin summary { cursor: pointer; }
+      .admin-panel > summary { padding: .8rem 1rem; font-weight: 700; color: #102B29; }
+      .admin-panel-body { padding: 0 1rem 1rem; }
+      .admin-panel-body p:last-child { margin-bottom: 0; }
+      .admin-list { display: grid; gap: .6rem; margin: 0; padding: 0; list-style: none; }
+      .admin-account > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: .55rem 1rem; padding: .85rem 1rem; }
+      .admin-account > summary::-webkit-details-marker { display: none; }
+      .admin-account > summary::after { content: ""; width: .5rem; height: .5rem; border: solid #526B69; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+      .admin-account[open] > summary::after { transform: rotate(225deg); }
+      .admin-account-meta { display: flex; flex-wrap: wrap; gap: .4rem; justify-content: end; }
+      .admin-account-body { padding: 1rem; border-top: 1px solid #D9E6E1; background: white; border-radius: 0 0 12px 12px; }
+      .admin-account-body > * + * { margin-top: 1rem; }
+      .admin-account-body > p { margin-bottom: 0; }
+      .admin-detail { display: grid; gap: .6rem; }
+      .admin-detail > * { margin: 0; }
+      .admin-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .6rem 1rem; padding: .75rem; border: 1px solid #D9E6E1; border-radius: 8px; }
+      .admin-row p { margin: 0; }
+      .admin-identity { display: grid; gap: .2rem; min-width: 0; }
+      .admin-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+      .admin-actions button[value="active"] { background: #0B725E; border-color: #0B725E; color: white; }
+      .admin-actions button[value="active"]:hover { background: #095C4D; border-color: #095C4D; }
+      .admin-access form { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto; }
+      .admin-audit { max-height: 30rem; overflow: auto; }
+      .admin-audit details { border-bottom: 1px solid #D9E6E1; }
+      .admin-audit summary { padding: .6rem 0; }
+      .admin-audit time { color: #526B69; font-size: .875rem; }
+      .admin-audit p { margin: .25rem 0; }
+      .admin-audit pre { margin: .5rem 0; white-space: pre-wrap; }
+      @media (max-width: 700px) { .admin-toolbar { grid-template-columns: 1fr; } }
+      @media (max-width: 460px) {
+        .admin-form form, .admin-search { grid-template-columns: 1fr; }
+        .admin-account > summary { grid-template-columns: minmax(0, 1fr) auto; }
+        .admin-account > summary::after { grid-column: 2; grid-row: 1; }
+        .admin-account-meta { grid-column: 1 / -1; justify-content: start; }
+      }
       @media (max-width: 700px) { .account-grid { grid-template-columns: 1fr; } }
       label { display: inline-grid; max-width: 100%; margin: .3rem; gap: .2rem; }
       a { color: #087F68; text-underline-offset: 3px; }
@@ -212,6 +256,17 @@ const administratorLabels = {
 const pill = (status, label) => '<span class="status-pill status-' + esc(status) + '">' + esc(label) + "</span>";
 const intranet = new Map([["portal", "Portal"], ["internal-documents", "Internal documents"]]);
 const intranetName = "Onesa Intranet";
+const adminLabel = value => value === "hr" ? "HR" : value.charAt(0).toUpperCase() + value.slice(1).replaceAll("-", " ");
+const adminEmail = email => "<!--email_off-->" + esc(email) + "<!--/email_off-->";
+const adminProductName = product => {
+  if (intranet.has(product)) return intranetName + " · " + intranet.get(product);
+  if (product === "identity") return "Onesa Identity";
+  if (product === "engineering-documents") return "Engineering Documents";
+  return accountProducts.get(product)?.name || adminLabel(product);
+};
+const auditDate = new Intl.DateTimeFormat("en-GB", {
+  dateStyle: "medium", timeStyle: "short", timeZone: "UTC",
+});
 const presentedProducts = (entries) => new Map(Array.from(entries, ([product, entry]) =>
   intranet.has(product) ? ["intranet", { name: intranetName }] : [product, entry]));
 const productSelect = (label, entries) =>
@@ -1019,9 +1074,10 @@ export function createApp(store, env, client = authClient(env)) {
                 hidden("id", user.id) + hidden("revision", user.revision) +
                 hidden("status", "revoked") + "<button>Remove administrator</button>")
             : "<span>Managed by Identity</span>";
-          return "<li><strong>" + esc(user.email) + "</strong> · " + esc(user.source) + " " + action + "</li>";
+          return '<li class="admin-row"><div class="admin-identity"><strong>' + adminEmail(user.email) +
+            '</strong><span class="muted">' + esc(user.source) + "</span></div>" + action + "</li>";
         }).join("");
-        const productName = accountProducts.get(scopeProduct)?.name || scopeProduct;
+        const productName = adminProductName(scopeProduct);
         const requests = store.all(
           `SELECT a.id,a.email,a.revision FROM accounts a
             JOIN audit e ON e.seq=(
@@ -1032,127 +1088,123 @@ export function createApp(store, env, client = authClient(env)) {
             ORDER BY a.email`,
           scopeProduct,
         );
-        const reviews = requests.map(user => "<li><strong>" + esc(user.email) + "</strong> " +
+        const reviews = requests.map(user => '<li class="admin-row"><strong>' + adminEmail(user.email) + "</strong>" +
           (session.id === user.id ? '<span>Another administrator must review this request.</span>' :
             post("/admin/change", session.csrf, hidden("kind", "product-administrator-review") +
               hidden("product", scopeProduct) + hidden("id", user.id) + hidden("revision", user.revision) +
-              '<button name="status" value="active">Approve administrator access</button> ' +
-              '<button name="status" value="rejected">Decline request</button>')) + "</li>").join("");
+              '<div class="admin-actions"><button name="status" value="active">Approve administrator access</button>' +
+              '<button name="status" value="rejected">Decline request</button></div>')) + "</li>").join("");
         return page(
           productName + " administrators",
-          (reviews ? "<h2>Pending administrator requests</h2><ul>" + reviews + "</ul>" : "") +
-            "<h2>Current administrators</h2>" +
-            "<ul>" + (list || "<li>No administrators assigned.</li>") + "</ul>" +
+          '<div class="identity-admin">' +
+            (globalAdministrator ? '<a href="/admin">Identity administration</a>' : "") +
+            (reviews ? '<section><h2>Pending administrator requests</h2><ul class="admin-list">' + reviews + "</ul></section>" : "") +
+            '<section><h2>Current administrators</h2>' +
+            (list ? '<ul class="admin-list">' + list + "</ul>" : "<p>No administrators assigned.</p>") + "</section>" +
+            '<details class="admin-panel admin-form"><summary>Add an administrator</summary><div class="admin-panel-body">' +
             post("/admin/change", session.csrf,
               hidden("kind", "product-administrator") + hidden("product", scopeProduct) + hidden("status", "active") +
               '<label>Verified Onesa account email<input type="email" name="email" required autocomplete="off"></label>' +
-              '<button>Add administrator</button>') +
-            (globalAdministrator ? '<p><a href="/admin">Identity administration</a></p>' : ""),
+              '<button class="primary">Add administrator</button>') + "</div></details></div>",
+          200, true, globalAdministrator,
         );
       }
-      const users = store.all(
-        "SELECT * FROM accounts ORDER BY email LIMIT 201",
-      );
-      const search = url.searchParams.get("id") || "";
-      const shown = search
-        ? store.all("SELECT * FROM accounts WHERE id=?", search)
-        : users.slice(0, 200);
-      const panels = shown
-        .map((u) => {
-          const base = hidden("id", u.id) + hidden("revision", u.revision);
-          const enrollmentReviews = [...registrations(store.db, u.id)].map(([tier, status]) => {
-            const title = tier === "admin" ? "Shared administrator registration" : "Shared user registration";
-            if (session.id === u.id) return "<p>" + title + " · " + esc(status) + "</p>";
-            const buttons = status === "active" ? '<button name="status" value="revoked">Remove access</button>'
-              : '<button name="status" value="active">Approve registration</button>' +
-                (status === "pending" ? ' <button name="status" value="rejected">Decline</button>' : '');
-            return post("/admin/change", session.csrf, base + hidden("kind", "registration") + hidden("tier", tier) +
-              "<fieldset><legend>" + title + " · " + esc(status) + "</legend>" + buttons + "</fieldset>");
-          }).join("");
-          const grants = store.all("SELECT product,role,status FROM grants WHERE id=? ORDER BY product", u.id);
-          const administratorRequests = [...productAdministratorRequests(store.db, u.id)]
-            .filter(([, status]) => status === "pending")
-            .map(([product]) => '<p><a href="/admin?product=' + esc(product) + '">Review ' +
-              esc(accountProducts.get(product).name) + ' administrator request</a></p>').join("");
-          const reviews = grants.filter(g =>
-            g.status === "pending" && accountProducts.get(g.product)?.role === g.role,
-          ).map(g => post("/admin/change", session.csrf,
-            base + hidden("kind", "review") + hidden("assignment", g.product + "/" + g.role) +
-            "<fieldset><legend>" + esc(accountProducts.get(g.product).name) + " · " + esc(g.role) +
-            ' access request</legend><button name="status" value="active">Approve</button> ' +
-            '<button name="status" value="rejected">Decline</button></fieldset>',
-          )).join("");
-          return (
-            "<article><h2>" +
-            esc(u.email) +
-            "</h2><p><code>" +
-            esc(u.id) +
-            "</code> · " +
-            esc(u.status) +
-            "</p><p>" +
-            grants.map(g => [g.product, g.role, g.status].map(esc).join(" / ")).join(", ") +
-            "</p>" +
-            post(
-              "/admin/change",
-              session.csrf,
-              base +
-                hidden("kind", "status") +
-                '<label>Account status<select name="status">' +
-                options(["active", "suspended", "pending", "rejected"], u.status) +
-                "</select></label><button>Update account</button>",
-            ) +
-            enrollmentReviews + reviews + administratorRequests +
-            post(
-              "/admin/change",
-              session.csrf,
-              base +
-                hidden("kind", "grant") +
-                '<label>Product and role<select name="assignment" required>' +
-                '<option value="" disabled selected>Choose a product and role</option>' +
-                options(
-                  Object.entries(products).flatMap(([product, roles]) =>
-                    roles.map((r) => product + "/" + r),
-                  ),
-                ) +
-                '</select></label><label>Access<select name="status">' +
-                options(["active", "revoked"]) +
-                "</select></label><button>Update access</button>",
-            ) +
-            "</article>"
-          );
-        })
-        .join("");
-      const history = store
-        .all("SELECT * FROM audit ORDER BY seq DESC LIMIT 100")
-        .map(
-          (a) =>
-            "<li>" +
-            esc(new Date(a.at).toISOString()) +
-            " · " +
-            esc(a.actor) +
-            " · " +
-            esc(a.action) +
-            " · " +
-            esc(a.target) +
-            " " +
-            esc(a.detail) +
-            "</li>",
-        )
-        .join("");
+      const id = url.searchParams.get("id") || "";
+      const search = (url.searchParams.get("q") || "").trim().slice(0, 254);
+      const users = id
+        ? store.all("SELECT * FROM accounts WHERE id=?", id)
+        : search
+          ? store.all("SELECT * FROM accounts WHERE id=? OR instr(lower(email),lower(?))>0 ORDER BY email LIMIT 201", search.toLowerCase(), search)
+          : store.all("SELECT * FROM accounts ORDER BY email LIMIT 201");
+      const openAccount = Boolean((id || search) && users.length === 1);
+      const assignments = Object.entries(products).map(([product, roles]) => {
+        const name = adminProductName(product);
+        return '<optgroup label="' + esc(name) + '">' +
+          roles.map(role => '<option value="' + esc(product + "/" + role) + '">' +
+            esc(name + " · " + adminLabel(role)) + "</option>").join("") + "</optgroup>";
+      }).join("");
+      const pendingAccounts = [], otherAccounts = [];
+      for (const user of users.slice(0, 200)) {
+        const base = hidden("id", user.id) + hidden("revision", user.revision);
+        const grants = store.all("SELECT product,role,status FROM grants WHERE id=? ORDER BY product", user.id);
+        const registrationsByTier = [...registrations(store.db, user.id)];
+        const administratorRequests = [...productAdministratorRequests(store.db, user.id)]
+          .filter(([, status]) => status === "pending");
+        const accessRequests = grants.filter(grant =>
+          grant.status === "pending" && accountProducts.get(grant.product)?.role === grant.role);
+        const reviewCount = accessRequests.length + administratorRequests.length +
+          (session.id === user.id ? 0 : registrationsByTier.filter(([, status]) => status === "pending").length);
+        const registrationRows = registrationsByTier.map(([tier, status]) => {
+          const title = tier === "admin" ? "Shared administrator registration" : "Shared user registration";
+          const row = '<div class="admin-row"><strong>' + title + "</strong>" + pill(status, adminLabel(status));
+          if (session.id === user.id) return row + "</div>";
+          const buttons = status === "active" ? '<button name="status" value="revoked">Remove access</button>'
+            : '<button name="status" value="active">Approve registration</button>' +
+              (status === "pending" ? '<button name="status" value="rejected">Decline</button>' : "");
+          return post("/admin/change", session.csrf, base + hidden("kind", "registration") + hidden("tier", tier) +
+            row + '<div class="admin-actions">' + buttons + "</div></div>");
+        }).join("");
+        const requestRows = accessRequests.map(grant => post("/admin/change", session.csrf,
+          base + hidden("kind", "review") + hidden("assignment", grant.product + "/" + grant.role) +
+          '<div class="admin-row"><div class="admin-identity"><strong>' + esc(adminProductName(grant.product)) +
+          '</strong><span class="muted">' + esc(adminLabel(grant.role)) + ' access request</span></div>' +
+          '<div class="admin-actions"><button name="status" value="active">Approve</button>' +
+          '<button name="status" value="rejected">Decline</button></div></div>',
+        )).join("") + administratorRequests.map(([product]) =>
+          '<p class="admin-row"><a href="/admin?product=' + esc(product) + '">Review ' +
+          esc(adminProductName(product)) + " administrator request</a></p>",
+        ).join("");
+        const grantRows = grants.map(grant =>
+          '<li class="admin-row"><div class="admin-identity"><strong>' + esc(adminProductName(grant.product)) +
+          '</strong><span class="muted">' + esc(adminLabel(grant.role)) + "</span></div>" +
+          pill(grant.status, adminLabel(grant.status)) + "</li>",
+        ).join("");
+        const account = '<li><details class="admin-account"' + (openAccount ? " open" : "") + ">" +
+          '<summary><strong>' + adminEmail(user.email) + '</strong><span class="admin-account-meta">' +
+          pill(user.status, adminLabel(user.status)) +
+          (reviewCount ? pill("pending", reviewCount + (reviewCount === 1 ? " pending request" : " pending requests")) : "") +
+          '</span></summary><div class="admin-account-body">' +
+          '<p class="muted">Onesa user ID <code>' + esc(user.id) + "</code></p>" +
+          (registrationRows || requestRows ? '<section class="admin-detail"><h3>Requests and registration</h3>' + registrationRows + requestRows + "</section>" : "") +
+          (grantRows ? '<section><h3>Product access</h3><ul class="admin-list">' + grantRows + "</ul></section>" : "") +
+          '<details class="admin-panel admin-form"><summary>Manage account status</summary><div class="admin-panel-body">' +
+          post("/admin/change", session.csrf, base + hidden("kind", "status") +
+            '<label>Account status<select name="status">' +
+            options(["active", "suspended", "pending", "rejected"], user.status) +
+            "</select></label><button>Update account</button>") + "</div></details>" +
+          '<details class="admin-panel admin-form admin-access"><summary>Manage product access</summary><div class="admin-panel-body">' +
+          post("/admin/change", session.csrf, base + hidden("kind", "grant") +
+            '<label>Product and role<select name="assignment" required><option value="" disabled selected>Choose a product and role</option>' +
+            assignments + '</select></label><label>Access<select name="status">' +
+            options(["active", "revoked"]) + "</select></label><button>Update access</button>") +
+          "</div></details></div></details></li>";
+        (reviewCount ? pendingAccounts : otherAccounts).push(account);
+      }
+      const history = store.all("SELECT * FROM audit ORDER BY seq DESC LIMIT 100").map(event => {
+        const date = new Date(event.at);
+        return '<li><details><summary>' + esc(adminLabel(event.action)) + ' · <time datetime="' +
+          esc(date.toISOString()) + '">' + esc(auditDate.format(date)) + " UTC</time></summary>" +
+          "<p>Actor <code>" + esc(event.actor) + "</code></p><p>Target <code>" + esc(event.target) +
+          "</code></p><pre>" + esc(event.detail) + "</pre></details></li>";
+      }).join("");
       return page(
         "Identity administration",
-        post(
-          "/admin/invite",
-          session.csrf,
-          '<label>Invitation email<input type="email" required name="email"></label><button>Create invitation</button>',
-        ) +
-          '<form><label>Find by Onesa user ID<input name="id" value="' +
-          esc(search) +
-          '"></label><button>Find</button></form>' +
-          panels +
-          "<h2>Recent audit history</h2><ol>" +
-          history +
-          "</ol>",
+        '<div class="identity-admin"><div class="admin-toolbar">' +
+          '<form class="admin-search" action="/admin"><label>Find by email or Onesa user ID<input type="search" name="q" maxlength="254" value="' +
+          esc(id || search) + '"></label><button class="primary">Find</button></form>' +
+          '<details class="admin-panel admin-form"><summary>Create invitation</summary><div class="admin-panel-body">' +
+          post("/admin/invite", session.csrf,
+            '<label>Invitation email<input type="email" required name="email"></label><button>Create invitation</button>') +
+          "</div></details></div>" +
+          (id || search ? '<a href="/admin">Show all accounts</a>' : "") +
+          (pendingAccounts.length ? '<section><h2>Pending requests</h2><ul class="admin-list">' + pendingAccounts.join("") + "</ul></section>" : "") +
+          (otherAccounts.length ? "<section><h2>" + (pendingAccounts.length ? "Other accounts" : "Accounts") +
+            '</h2><ul class="admin-list">' + otherAccounts.join("") + "</ul></section>" : "") +
+          (!users.length ? '<p class="muted">No matching accounts.</p>' : "") +
+          (users.length > 200 ? '<p class="muted">Showing the first 200 accounts. Use search to find a specific account.</p>' : "") +
+          '<details class="admin-panel"><summary>Recent audit history</summary><div class="admin-panel-body admin-audit">' +
+          (history ? '<ol class="admin-list">' + history + "</ol>" : '<p class="muted">No audit events recorded.</p>') +
+          "</div></details></div>",
         200, true, true,
       );
     }
