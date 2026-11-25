@@ -2157,6 +2157,26 @@ test("a stale tab does not consume the current browser's sign-in challenge", asy
   assert.equal((await finish(current)).status, 400);
 });
 
+test("Identity administration lists reviewable accounts first and opens a single search result", async (t) => {
+  const { call, login, store } = await fixture(t);
+  const active = store.register(env.issuer, "fixture|active-account", "a-account@example.test");
+  store.change("test", active.id, active.revision, { kind: "status", status: "active" });
+  const review = store.register(env.issuer, "fixture|pending-request", "z-request@example.test");
+  store.requestAccess(review.id, "pasofi");
+  const admin = await login("identity-admin");
+  const headers = { cookie: admin.cookie };
+  const page = await (await call("/admin", "GET", undefined, headers)).text();
+  assert.match(page, /<h2>Pending requests<\/h2>[\s\S]*z-request@example\.test[\s\S]*<h2>Other accounts<\/h2>[\s\S]*a-account@example\.test/);
+  assert.doesNotMatch(page, /<details class="admin-account" open>/);
+  assert.match(page, /<!--email_off-->z-request@example\.test<!--\/email_off-->/);
+  assert.match(page, /<optgroup label="PasoFi">[\s\S]*value="pasofi\/administrator">PasoFi · Administrator/);
+  for (const query of ["?q=Z-REQUEST", "?id=" + review.id]) {
+    const result = await (await call("/admin" + query, "GET", undefined, headers)).text();
+    assert.match(result, /<details class="admin-account" open><summary><strong><!--email_off-->z-request@example\.test/);
+    assert.doesNotMatch(result, /<summary><strong><!--email_off-->a-account@example\.test/);
+  }
+});
+
 test("an administrator's status control reflects each persisted account state", async (t) => {
   const { call, login, store } = await fixture(t);
   const user = store.register(env.issuer, "fixture|user", "user@example.test");
