@@ -136,8 +136,9 @@ exports.onExecutePostLogin = async (event, api) => {
     .map((m) => Date.parse(m.timestamp))
     .filter(Number.isFinite);
   const latest = observed.length ? Math.max(...observed) : 0;
-  const mfaTime = latest > 0 && latest <= Date.now() ? Math.floor(latest / 1000) : 0;
-  if ((decision.require_mfa === true || infrastructure) &&
+  const pasoFiRenewal = decision.product === "pasofi" && event.transaction?.protocol === "oauth2-refresh-token";
+  const mfaTime = !pasoFiRenewal && latest > 0 && latest <= Date.now() ? Math.floor(latest / 1000) : 0;
+  if (!pasoFiRenewal && (decision.require_mfa === true || infrastructure) &&
       (!mfaTime || mfaTime > Math.floor(Date.now() / 1000) ||
        Math.floor(Date.now() / 1000) - mfaTime > 300)) return deny();
   const transaction = event.transaction || {};
