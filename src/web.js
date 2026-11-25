@@ -152,6 +152,7 @@ const retryPath = (destination, origin) => {
   const target = new URL(destination, origin);
   const factorRoute = target.searchParams.get("_factor");
   target.searchParams.delete("_factor");
+  target.searchParams.delete("_factor_primary");
   if (factorRoute === "/step-up" || factorRoute === "/verify-factor")
     return factorRoute + "?return=" + encodeURIComponent(target.pathname + target.search + target.hash);
   const invite = target.searchParams.get("invite");
@@ -273,11 +274,16 @@ export function authClient(env, transport) {
         expectedState: challenge.state,
         pkceCodeVerifier: challenge.verifier,
         idTokenExpected: true,
-        ...(new URL(challenge.destination, env.origin).searchParams.has("_factor") ? { maxAge: 300 } : {}),
+        ...factorAge(challenge.destination, env.origin),
       });
       return tokens.claims();
     },
   };
+}
+function factorAge(destination, origin) {
+  const params = new URL(destination, origin).searchParams;
+  if (!params.has("_factor")) return {};
+  return { maxAge: params.get("_factor_primary") === "reuse" ? 1800 : 300 };
 }
 export function createApp(store, env, client = authClient(env)) {
   const authenticator = env.authenticatorKey ? accountAuthenticator(store, env.authenticatorKey) : null;
@@ -586,12 +592,21 @@ export function createApp(store, env, client = authClient(env)) {
         if (emailVerification === "resend") params.onesa_email_verification = "resend";
       }
       if (p === "/step-up" || p === "/verify-factor") {
-        params.prompt = "login";
-        params.max_age = "0";
+        const now = Date.now();
+        const sessionHash = digest(readCookie(req, "session"));
+        const signedIn = authenticator && store.one(sessionLookup, sessionHash, now);
+        if (signedIn?.state === "active" && authenticator.enrolled(signedIn.id)) {
+          const attempt = authenticator.start(sessionHash, signedIn.id, destination, now);
+          return redirect("/account/authenticator", [cookie("authenticator", attempt, 300)]);
+        }
+        const reuse = signedIn?.state === "active" && url.searchParams.get("confirm_sign_in") !== "1";
+        params.prompt = reuse ? "none" : "login";
+        params.max_age = reuse ? "1800" : "0";
         params.acr_values =
           "http://schemas.openid.net/pape/policies/2007/06/multi-factor";
         const target = new URL(destination, env.origin);
         target.searchParams.set("_factor", p);
+        if (reuse) target.searchParams.set("_factor_primary", "reuse");
         destination = target.pathname + target.search + target.hash;
       }
       const location = await client.authorize(params);
@@ -637,6 +652,14 @@ export function createApp(store, env, client = authClient(env)) {
         return page("Sign-in expired", '<a href="' + esc(retry) + '">Start sign-in again</a>', 400);
       }
       const oauthError = url.searchParams.get("error");
+      if (["login_required","interaction_required","consent_required"].includes(oauthError) &&
+          new URL(flow.destination, env.origin).searchParams.get("_factor_primary") === "reuse") {
+        const retry = new URL(retryPath(flow.destination, env.origin), env.origin);
+        retry.searchParams.set("confirm_sign_in", "1");
+        return page("Confirm your Onesa sign-in",
+          '<p>Before you add your first authenticator, Onesa needs to confirm your password once.</p><a class="primary" href="' +
+          esc(retry.pathname + retry.search) + '">Confirm sign-in</a>', 401);
+      }
       if (oauthError)
         return signInFailure(
           oauthError,
@@ -673,6 +696,7 @@ export function createApp(store, env, client = authClient(env)) {
       const target = new URL(flow.destination, env.origin);
       const requiresFactor = target.searchParams.has("_factor");
       target.searchParams.delete("_factor");
+      target.searchParams.delete("_factor_primary");
       const now = Date.now();
       const factor = identity[mfaClaim] * 1000;
       const factorVerified = Number.isSafeInteger(identity[mfaClaim]) && freshFactor(factor, now);
@@ -956,7 +980,9 @@ export function createApp(store, env, client = authClient(env)) {
       return factorVerification(
         "Verify your identity",
         "/step-up?return=" + encodeURIComponent(scopeProduct ? "/admin?product=" + scopeProduct : "/admin"),
-        "To open administration, sign in again and complete the authenticator prompt. If this is your first verification, follow the setup instructions.",
+        authenticator
+          ? "Enter a code from your authenticator app. If this is your first verification, follow the setup instructions."
+          : "To open administration, sign in again and complete the authenticator prompt. If this is your first verification, follow the setup instructions.",
       );
     if (p === "/admin" && method === "GET") {
       if (scopeProduct) {

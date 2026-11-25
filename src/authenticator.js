@@ -64,6 +64,9 @@ export function accountAuthenticator(store, key) {
       ends_at=CASE WHEN ends_at>? THEN ends_at ELSE excluded.ends_at END`, id, now + limitWindow, now, now);
   }
   return {
+    enrolled(accountId) {
+      return Boolean(store.one("SELECT 1 FROM account_authenticators WHERE id=?", accountId));
+    },
     start(sessionHash, accountId, destination, now) {
       const token = secret();
       const existing = store.one("SELECT 1 FROM account_authenticators WHERE id=?", accountId);
