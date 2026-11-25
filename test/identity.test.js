@@ -1210,7 +1210,11 @@ test("active Onesa administrators can enroll and verify a local authenticator af
   assert.equal((await call(path, "GET", undefined, { cookie: factor })).status, 403);
   const setup = await call(path, "GET", undefined, headers);
   assert.equal(setup.status, 200);
+  assert.equal(setup.headers.get("cache-control"), "no-store");
+  assert.equal(setup.headers.get("referrer-policy"), "no-referrer");
+  assert.match(setup.headers.get("content-security-policy"), /img-src [^;]* data:/);
   const html = await setup.text();
+  assert.match(html, /src="data:image\/gif;base64,[A-Za-z0-9+/]+=*" alt="Onesa authenticator setup QR code"/);
   const setupKey = html.match(/aria-label="Authenticator setup key">([A-Z2-7]+)</)[1];
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
   const bits = Array.from(setupKey, letter => alphabet.indexOf(letter).toString(2).padStart(5, "0")).join("");
@@ -1234,6 +1238,7 @@ test("active Onesa administrators can enroll and verify a local authenticator af
   const challenge = await (await call(path, "GET", undefined, laterHeaders)).text();
   assert.match(challenge, /Enter your authenticator code/);
   assert.doesNotMatch(challenge, /Authenticator setup key/);
+  assert.doesNotMatch(challenge, /authenticator setup QR code/);
   const nextCsrf = challenge.match(/name="csrf" value="([^"]+)"/)[1];
   const previousCode = authenticatorCode(raw, stored.last_counter);
   assert.equal((await call(path, "POST", new URLSearchParams({ csrf: nextCsrf, code: previousCode }).toString(), laterHeaders)).status, 400);
