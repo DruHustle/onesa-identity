@@ -302,7 +302,7 @@ test("the public Account overview returns a signed-in visitor to the selected fe
     assert.equal(overview.status, 200);
     assert.equal(overview.headers.get("cache-control"), "no-store");
     assert.equal(overview.headers.has("set-cookie"), false);
-    assert.match(html, /Company Portal.*Smart Farmer.*PasoFi/);
+    assert.match(html, /Onesa Intranet.*Smart Farmer.*PasoFi/);
     assert.doesNotMatch(html, /<form|identity-admin@onesa\.test/);
     for (const section of ["product-access", "account-security"]) {
       const returnPath = "/account#" + section;
@@ -862,6 +862,47 @@ test("an administrator reviews each displayed access request with its recorded r
   ]);
   assert.equal(store.lookup(env.issuer, "oidc|member").status, "pending");
   assert.doesNotMatch(await page(), /name="kind" value="review"/);
+});
+
+test("Onesa Intranet groups its entry points and requests both scopes without granting either", async (t) => {
+  const resources = new Map(env.resources);
+  resources.set("https://api.portal.onesa.test", { product: "portal", clients: ["portal-web"] });
+  const registrationReturns = new Map([
+    [returnKey("portal", "web", "user"), "https://portal.onesa.test/account/registered"],
+    [returnKey("internal-documents", "web", "user"), "https://docs.internal.onesa.test/registration/return"],
+  ]);
+  const { call, store, login, admin } = await fixture(t, { resources, registrationReturns });
+  const member = await login("intranet-member", "/account");
+  const account = () => store.lookup(env.issuer, "oidc|intranet-member");
+  const headers = { cookie: member.cookie, origin: env.origin };
+  const dashboard = async () => (await call("/account", "GET", undefined, headers)).text();
+  const initial = await dashboard();
+  assert.equal((initial.match(/<option value="intranet">Onesa Intranet<\/option>/g) ?? []).length, 2);
+  assert.doesNotMatch(initial, /<option value="(?:portal|internal-documents)">/);
+  const csrf = initial.match(/name="csrf" value="([^"]+)"/)[1];
+  const request = (path, form = {}) => call(path, "POST", new URLSearchParams({ product: "intranet", csrf, ...form }), headers);
+
+  assert.equal((await request("/account/access")).status, 303);
+  const expected = ["internal-documents", "portal"];
+  const grants = () => store.all("SELECT product,role,status FROM grants WHERE id=? ORDER BY product", account().id);
+  assert.deepEqual(grants().map(({product, role, status}) => [product, role, status]),
+    expected.map(product => [product, "viewer", "pending"]));
+  assert.equal((await request("/account/enrollment", {tier: "admin"})).headers.get("location"), "/account#access-intranet");
+  assert.equal(productAdministratorRequests(store.db, account().id).get("portal"), "pending");
+  assert.equal(productAdministratorRequests(store.db, account().id).get("internal-documents"), "pending");
+  const revision = account().revision;
+  await request("/account/access");
+  await request("/account/enrollment", {tier: "admin"});
+  assert.equal(account().revision, revision);
+
+  store.change(admin.id, account().id, account().revision, {kind: "status", status: "active"});
+  store.change(admin.id, account().id, account().revision, {kind: "grant", product: "portal", role: "viewer", status: "active"});
+  store.change(admin.id, account().id, account().revision, {kind: "grant", product: "internal-documents", role: "viewer", status: "revoked"});
+  const page = await dashboard();
+  assert.match(page, /<li id="access-intranet"><strong>Onesa Intranet<\/strong>.*id="access-portal".*Open Portal.*id="access-internal-documents".*Access removed/);
+  assert.doesNotMatch(page, /href="https:\/\/docs\.internal\.onesa\.test\/registration\/return"/);
+  await request("/account/access");
+  assert.equal(grants().find(g => g.product === "internal-documents").status, "revoked");
 });
 
 test("Identity UI changes grant, revocation and suspension at next issuance; resources scoped to client/audience", async (t) => {

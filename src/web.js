@@ -66,6 +66,8 @@ const page = (title, body, status = 200, wide = false, administration = false) =
       .products li { display: grid; gap: .35rem; padding: .75rem; border: 1px solid #D9E6E1; border-radius: 10px; }
       .products li:target { border-color: #0B725E; background: #F0F8F5; }
       .product-states { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; }
+      .intranet-areas { display: grid; gap: .5rem; }
+      .intranet-area { display: grid; gap: .35rem; padding: .55rem 0 0; border-top: 1px solid #D9E6E1; }
       .account-footer { margin-top: 16px; }
       @media (max-width: 700px) { .account-grid { grid-template-columns: 1fr; } }
       label { display: inline-grid; max-width: 100%; margin: .3rem; gap: .2rem; }
@@ -193,9 +195,13 @@ const administratorLabels = {
   revoked: "Administrator access removed",
 };
 const pill = (status, label) => '<span class="status-pill status-' + esc(status) + '">' + esc(label) + "</span>";
+const intranet = new Map([["portal", "Portal"], ["internal-documents", "Internal documents"]]);
+const intranetName = "Onesa Intranet";
+const presentedProducts = (entries) => new Map(Array.from(entries, ([product, entry]) =>
+  intranet.has(product) ? ["intranet", { name: intranetName }] : [product, entry]));
 const productSelect = (label, entries) =>
   '<label>' + esc(label) + '<select name="product" required><option value="" disabled selected>Choose a product</option>' +
-  entries.map(([product, { name }]) => '<option value="' + esc(product) + '">' + esc(name) + "</option>").join("") +
+  Array.from(presentedProducts(entries), ([product, { name }]) => '<option value="' + esc(product) + '">' + esc(name) + "</option>").join("") +
   "</select></label>";
 const mfaClaim = "https://onesa.eu/claims/mfa_time";
 async function sendVerificationEmail(verification, subject, accountClient) {
@@ -268,6 +274,9 @@ export function createApp(store, env, client = authClient(env)) {
       digest(readCookie(req, "registration")), Date.now());
   }
   const connectedProducts = new Set(Array.from(env.resources.values(), item => item.product));
+  const requestedProducts = product => product === "intranet"
+    ? [...intranet.keys()].filter(scope => connectedProducts.has(scope))
+    : connectedProducts.has(product) && accountProducts.has(product) ? [product] : [];
   const adminEnabled = new Set(Array.from(env.resources.values())
     .filter(resource => ["admin", "administrator"].includes(resource.sharedAdminRole))
     .map(resource => resource.product));
@@ -281,6 +290,7 @@ export function createApp(store, env, client = authClient(env)) {
     ).map(row => row.product));
     const requests = productAdministratorRequests(store.db, session.id);
     const rows = [];
+    const intranetAreas = [];
     const additionalAccess = [];
     const additionalAdministrator = [];
     for (const [product, { name }] of accountProducts) {
@@ -296,7 +306,7 @@ export function createApp(store, env, client = authClient(env)) {
       if (connected && !decision && !administrator) additionalAccess.push(entry);
       if (connected && !request) additionalAdministrator.push(entry);
       if (!decision && !request) continue;
-      const label = legacy && !decisions.has(product) ? "Internal Documents (Engineering)" : name;
+      const label = legacy && !decisions.has(product) ? "Internal Documents (Engineering)" : intranet.get(product) || name;
       const states = [];
       if (decision && (!administrator || !["administrator", "owner"].includes(decision.role))) {
         const status = decision.status === "active" && session.state === "pending" ? "pending" : decision.status;
@@ -310,10 +320,14 @@ export function createApp(store, env, client = authClient(env)) {
       const destination = returns.get(returnKey(product, "web", administrator ? "admin" : "user"));
       const open = connected && session.state === "active" && destination &&
         (administrator || decision?.status === "active")
-        ? '<a href="' + esc(destination) + '">Open ' + esc(name) + '</a>' : "";
-      rows.push('<li id="access-' + esc(product) + '"><strong>' + esc(label) + '</strong>' +
-        '<div class="product-states">' + states.join("") + "</div>" + open + "</li>");
+        ? '<a href="' + esc(destination) + '">Open ' + esc(intranet.get(product) || name) + '</a>' : "";
+      const summary = '<strong>' + esc(label) + '</strong>' +
+        '<div class="product-states">' + states.join("") + "</div>" + open;
+      if (intranet.has(product)) intranetAreas.push('<div class="intranet-area" id="access-' + esc(product) + '">' + summary + '</div>');
+      else rows.push('<li id="access-' + esc(product) + '">' + summary + "</li>");
     }
+    if (intranetAreas.length) rows.unshift('<li id="access-intranet"><strong>' + intranetName +
+      '</strong><div class="intranet-areas">' + intranetAreas.join("") + '</div></li>');
     const accountAccess = '<section class="account-panel" aria-labelledby="product-access"><h2 id="product-access">Product access</h2>' +
       (rows.length ? '<ul class="products">' + rows.join("") + '</ul>' : '<p>No product access requests yet.</p>') +
       (additionalAccess.length ? post("/account/access", session.csrf, '<div class="actions">' +
@@ -653,7 +667,7 @@ export function createApp(store, env, client = authClient(env)) {
           '<a href="' + featureSignIn("#administrator-access") + '">Request administrator access</a></div>' +
           '<section aria-labelledby="access-overview"><h2 id="access-overview">Product access</h2>' +
           '<p>See your product access, request another product, or check the status of an administrator request.</p>' +
-          '<p>' + Array.from(accountProducts.values(), ({ name }) => esc(name)).join(" · ") + '</p>' +
+          '<p>' + Array.from(presentedProducts(accountProducts).values(), ({ name }) => esc(name)).join(" · ") + '</p>' +
           '<a href="' + featureSignIn("#product-access") + '">Sign in to manage product access</a></section>' +
           '<section aria-labelledby="security-overview"><h2 id="security-overview">Account security</h2>' +
           '<p>Set up or verify a second sign-in factor and find password recovery options.</p>' +
@@ -711,17 +725,19 @@ export function createApp(store, env, client = authClient(env)) {
       if (!compare(form.get("csrf"), session.csrf)) return formDenied();
       if (p === "/account/enrollment") {
         const product = form.get("product");
+        const requested = requestedProducts(product);
         if (form.getAll("product").length > 1 || form.getAll("tier").length !== 1 ||
-            (product !== null && (!connectedProducts.has(product) || !accountProducts.has(product) || form.get("tier") !== "admin")))
+            (product !== null && (!requested.length || form.get("tier") !== "admin")))
           return page("Choose a product", '<a href="/account#administrator-access">Return to administrator access</a>', 400);
-        store.requestRegistration(session.id, form.get("tier"), product);
+        store.requestRegistration(session.id, form.get("tier"), ...requested);
         return redirect(product ? "/account#access-" + product : "/account");
       }
       if (p === "/account/access") {
         const product = form.get("product");
-        if (!connectedProducts.has(product) || !accountProducts.has(product))
+        const requested = requestedProducts(product);
+        if (form.getAll("product").length !== 1 || !requested.length)
           return page("Product unavailable", '<a href="/account">Return to your account</a>', 400);
-        store.requestAccess(session.id, product);
+        store.requestAccess(session.id, ...requested);
         return redirect("/account");
       }
       if (p === "/account/delete") {

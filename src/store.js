@@ -351,13 +351,14 @@ export function openStore(path, { existingOnly = false } = {}) {
     }
     run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
   }
-  function requestRegistration(id, tier, product = null) {
+  function requestRegistration(id, tier, product = null, ...otherProducts) {
     return atomic(() => {
       const account = one("SELECT status FROM accounts WHERE id=?", id);
       check(["active", "pending"].includes(account?.status), "Account unavailable");
       if (!product) return recordRequest(id, tier);
-      check(tier === "admin" && accountProducts.has(product), "Invalid administrator request");
-      recordProductAdministratorRequest(id, product);
+      const requested = [product, ...otherProducts];
+      check(tier === "admin" && requested.every(scope => accountProducts.has(scope)), "Invalid administrator request");
+      for (const scope of requested) recordProductAdministratorRequest(id, scope);
     });
   }
   function register(issuer, sub, email, invitation = "", tier, product = null) {
@@ -477,11 +478,11 @@ export function openStore(path, { existingOnly = false } = {}) {
     run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
     audit(id, "request-product-access", id, { product, role: requested.role });
   }
-  function requestAccess(id, product) {
+  function requestAccess(id, ...requestedProducts) {
     return atomic(() => {
       const account = one("SELECT status FROM accounts WHERE id=?", id);
       check(["active", "pending"].includes(account?.status), "Account unavailable");
-      recordAccessRequest(id, product);
+      for (const product of requestedProducts) recordAccessRequest(id, product);
     });
   }
   // A requested closure immediately removes central access, while each
