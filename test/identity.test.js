@@ -1133,6 +1133,42 @@ test("policy decisions reject active grants whose role is not allowed for that p
   assert.equal(response.status, 403);
 });
 
+test("scoped authenticator verification survives other tabs and stops when the provider omits MFA", async t => {
+  const { call, login, setRedeem } = await fixture(t);
+  const session = await login("identity-admin", "/admin", Date.now() - 600000);
+  const retry = "/step-up?return=%2Fadmin%3Fproduct%3Dpasofi";
+  const initial = await call("/admin?product=pasofi", "GET", undefined, { cookie: session.cookie });
+  assert.equal(initial.status, 403);
+  assert.ok((await initial.text()).includes(retry));
+  const start = async path => {
+    const response = await call(path);
+    const authorize = new URL(response.headers.get("location"));
+    return { state: authorize.searchParams.get("state"), cookie: response.headers.getSetCookie()[0].split(";")[0], authorize };
+  };
+  const flow = await start(retry);
+  assert.equal(flow.authorize.searchParams.get("max_age"), "0");
+  assert.equal(flow.authorize.searchParams.get("prompt"), "login");
+  const other = await start("/login");
+  assert.notEqual(flow.cookie.split("=")[0], other.cookie.split("=")[0]);
+  const complete = (attempt, cookie) => call("/callback?code=verified&state=" + attempt.state, "GET", undefined, { cookie });
+  const verifiedIdentity = { iss: env.issuer, sub: "oidc|identity-admin", email: "identity-admin@onesa.test", email_verified: true };
+  setRedeem(async () => verifiedIdentity);
+  const missing = await complete(flow, [session.cookie, flow.cookie, other.cookie].join("; "));
+  assert.equal(missing.status, 403);
+  assert.equal(missing.headers.getSetCookie().length, 0);
+  const message = await missing.text();
+  assert.match(message, /Second factor not verified/);
+  assert.ok(message.includes(retry));
+  assert.equal((await complete(other, other.cookie)).status, 303);
+  assert.equal((await complete(flow, flow.cookie)).status, 400);
+  const fresh = await start(retry);
+  setRedeem(async () => ({ ...verifiedIdentity, "https://onesa.eu/claims/mfa_time": Math.floor(Date.now() / 1000) }));
+  const completed = await complete(fresh, fresh.cookie);
+  assert.equal(completed.headers.get("location"), "/admin?product=pasofi");
+  const verifiedSession = completed.headers.getSetCookie()[0].split(";")[0];
+  assert.equal((await call(completed.headers.get("location"), "GET", undefined, { cookie: verifiedSession })).status, 200);
+});
+
 test("Portal administrator has no Identity access; stale MFA and forged form denied", async (t) => {
   const { store, call, login } = await fixture(t),
     a = store.register(env.issuer, "oidc|portal", "portal@onesa.test");
@@ -1154,7 +1190,7 @@ test("Portal administrator has no Identity access; stale MFA and forged form den
     await (
       await call("/admin", "GET", undefined, { cookie: stale.cookie })
     ).text(),
-    /fresh MFA/,
+    /Verify your identity/,
   );
   const aSession = await login("identity-admin");
   assert.equal(
