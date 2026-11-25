@@ -1,4 +1,5 @@
 import * as oidc from "openid-client";
+import qrcode from "qrcode-generator";
 import { infrastructureEntry, isRegistrationEntry, pasofiHotspotEntry, returnKey } from "./registration-returns.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { accountAuthenticator } from "./authenticator.js";
@@ -70,6 +71,8 @@ const page = (title, body, status = 200, wide = false, administration = false) =
       .intranet-areas { display: grid; gap: .5rem; }
       .intranet-area { display: grid; gap: .35rem; padding: .55rem 0 0; border-top: 1px solid #D9E6E1; }
       .account-footer { margin-top: 16px; }
+      .authenticator-qr { display: block; max-width: min(100%, 260px); height: auto; margin: 0 0 1rem; image-rendering: pixelated; }
+      .authenticator-manual { margin-bottom: 1rem; }
       @media (max-width: 700px) { .account-grid { grid-template-columns: 1fr; } }
       label { display: inline-grid; max-width: 100%; margin: .3rem; gap: .2rem; }
       a { color: #087F68; text-underline-offset: 3px; }
@@ -777,8 +780,18 @@ export function createApp(store, env, client = authClient(env)) {
         ]);
         feedback = '<p role="alert">That code could not be verified. Check the current code in your authenticator app.</p>';
       }
-      const setup = view.setupKey ? '<p>Add a time-based account called Onesa to your authenticator app using this setup key.</p>' +
-        '<p><code aria-label="Authenticator setup key">' + esc(view.setupKey) + '</code></p>' : "";
+      let setup = "";
+      if (view.setupKey) {
+        const account = encodeURIComponent(session.email.replaceAll(":", " "));
+        const qr = qrcode(0, "M");
+        qr.addData("otpauth://totp/Onesa:" + account + "?secret=" + view.setupKey + "&issuer=Onesa");
+        qr.make();
+        setup = '<p>Open your authenticator app, add an account, and scan this QR code. Then enter the six-digit code it shows.</p>' +
+          '<img class="authenticator-qr" src="' + qr.createDataURL(5) + '" alt="Onesa authenticator setup QR code">' +
+          '<details class="authenticator-manual"><summary>Enter a setup key instead</summary>' +
+          '<p>Add a time-based account called Onesa using this key.</p>' +
+          '<p><code aria-label="Authenticator setup key">' + esc(view.setupKey) + '</code></p></details>';
+      }
       return page(view.setupKey ? "Set up your authenticator" : "Enter your authenticator code",
         '<p>Verifying <strong>' + esc(session.email) + '</strong></p>' + setup + feedback +
         post("/account/authenticator", session.csrf,
@@ -1209,12 +1222,15 @@ export function createApp(store, env, client = authClient(env)) {
       }
     }
     response.headers.set("cache-control", "no-store");
-    const staffVerification = new URL(req.url).pathname === pasoFiFactorPath;
-    response.headers.set("referrer-policy", staffVerification ? "no-referrer" : "same-origin");
+    const pathname = new URL(req.url).pathname;
+    const staffVerification = pathname === pasoFiFactorPath;
+    const accountVerification = pathname === "/account/authenticator";
+    response.headers.set("referrer-policy", staffVerification || accountVerification ? "no-referrer" : "same-origin");
     response.headers.set("x-content-type-options", "nosniff");
     response.headers.set(
       "content-security-policy",
-      "default-src 'none'; img-src https://onesa.eu/brand/icons/v1/onesa-company-180.png; style-src 'unsafe-inline'; form-action 'self'" +
+      "default-src 'none'; img-src https://onesa.eu/brand/icons/v1/onesa-company-180.png" +
+      (accountVerification ? " data:" : "") + "; style-src 'unsafe-inline'; form-action 'self'" +
       (staffVerification ? " " + new URL(env.issuer).origin : "") + "; frame-ancestors 'none'; base-uri 'none'",
     );
     return response;
