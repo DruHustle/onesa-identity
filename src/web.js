@@ -32,9 +32,10 @@ const readCookie = (req, key) =>
     .split(/;\s*/)
     .find((c) => c.startsWith("__Host-onesa-" + key + "="))
     ?.split("=")[1] ?? "";
-const page = (title, body, status = 200, wide = false, administration = false) =>
+const page = (title, body, status = 200, wide = false, administration = false, resume = null) =>
   new Response(`<!doctype html><html lang="en"><head>
     <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+    ${resume ? '<meta http-equiv="refresh" content="0;url=' + esc(resume) + '">' : ""}
     <title>${esc(title)} · Onesa Account</title>
     <style>
       * { box-sizing: border-box; }
@@ -533,8 +534,14 @@ export function createApp(store, env, client = authClient(env)) {
           const next = new URL("/continue", env.issuer);
           next.searchParams.set("state", outcome.state);
           if (!outcome.receipt) {
-            const response = redirect(next.href, [cookie("pasofi-authenticator", "", 0)]);
+            // Chromium applies the verification form's CSP to its HTTP
+            // redirects. A new document starts the provider return as a GET.
+            const response = page("Returning to PasoFi",
+              '<p>Your authenticator was verified.</p>' +
+              '<a class="primary" rel="noreferrer" href="' + esc(next.href) + '">Continue to PasoFi</a>',
+              200, false, false, next.href);
             response.headers.set("referrer-policy", "no-referrer");
+            response.headers.append("set-cookie", cookie("pasofi-authenticator", "", 0));
             return response;
           }
           const response = page("Authenticator verified",
