@@ -1307,9 +1307,15 @@ test("PasoFi staff can enroll during app sign-in and return without a browser re
   assert.equal((await service("finish", { state })).status, 403);
   assert.equal((await call(step, "POST", form, { ...cookies, origin: "null" })).status, 403);
   const verified = await call(step, "POST", form, cookies);
-  assert.equal(verified.status, 303);
-  assert.equal(verified.headers.get("location"), new URL("/continue?state=" + state, env.issuer).href);
+  assert.equal(verified.status, 200);
+  assert.equal(verified.headers.has("location"), false);
   assert.equal(verified.headers.get("referrer-policy"), "no-referrer");
+  assert.match(verified.headers.getSetCookie()[0], /Max-Age=0/);
+  const returnPage = await verified.text();
+  const continuation = new URL("/continue?state=" + state, env.issuer).href;
+  assert.ok(returnPage.includes('<meta http-equiv="refresh" content="0;url=' + continuation + '">'));
+  assert.ok(returnPage.includes('rel="noreferrer" href="' + continuation + '">Continue to PasoFi</a>'));
+  assert.doesNotMatch(returnPage, /onesa_factor_receipt/);
   assert.equal((await service("finish", { state: state + "-wrong" })).status, 403);
   assert.equal((await service("finish", { state, receipt: "R".repeat(43) })).status, 403);
   assert.equal((await service("finish", { state })).status, 200);
