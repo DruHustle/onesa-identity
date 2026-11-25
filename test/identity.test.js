@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { authenticatorCode } from "../src/authenticator.js";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { spawnSync } from "node:child_process";
@@ -1167,6 +1168,58 @@ test("scoped authenticator verification survives other tabs and stops when the p
   assert.equal(completed.headers.get("location"), "/admin?product=pasofi");
   const verifiedSession = completed.headers.getSetCookie()[0].split(";")[0];
   assert.equal((await call(completed.headers.get("location"), "GET", undefined, { cookie: verifiedSession })).status, 200);
+});
+
+test("active Onesa administrators can enroll and verify a local authenticator after fresh provider sign-in", async t => {
+  const { call, login, setRedeem, store, admin } = await fixture(t, { authenticatorKey: Buffer.alloc(32, 5) });
+  const original = await login("identity-admin", "/admin", Date.now() - 600000);
+  const scope = "/admin?product=pasofi";
+  const path = "/account/authenticator";
+  const stepUp = "/step-up?return=" + encodeURIComponent(scope);
+  async function start(accountCookie, subject = "oidc|identity-admin") {
+    const response = await call(stepUp, "GET", undefined, { cookie: accountCookie });
+    const param = new URL(response.headers.get("location")).searchParams;
+    const attempt = response.headers.getSetCookie()[0].split(";")[0];
+    setRedeem(async () => ({ iss: env.issuer, sub: subject, email: "identity-admin@onesa.test", email_verified: true }));
+    return call("/callback?code=controlled&state=" + param.get("state"), "GET", undefined, {
+      cookie: accountCookie + "; " + attempt,
+    });
+  }
+  const mismatch = await start(original.cookie, "oidc|different");
+  assert.equal(mismatch.status, 403);
+  const started = await start(original.cookie);
+  assert.equal(started.headers.get("location"), path);
+  const factor = started.headers.getSetCookie()[0].split(";")[0];
+  const headers = { cookie: original.cookie + "; " + factor, origin: env.origin };
+  assert.equal((await call(path, "GET", undefined, { cookie: factor })).status, 403);
+  const setup = await call(path, "GET", undefined, headers);
+  assert.equal(setup.status, 200);
+  const html = await setup.text();
+  const setupKey = html.match(/aria-label="Authenticator setup key">([A-Z2-7]+)</)[1];
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const bits = Array.from(setupKey, letter => alphabet.indexOf(letter).toString(2).padStart(5, "0")).join("");
+  const raw = Buffer.from(bits.match(/[01]{8}/g).map(value => parseInt(value, 2)));
+  const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
+  const code = authenticatorCode(raw, Math.floor(Date.now() / 30000));
+  const form = new URLSearchParams({ csrf, code }).toString();
+  assert.equal((await call(path, "POST", form, { ...headers, origin: "https://untrusted.test" })).status, 403);
+  const valid = await call(path, "POST", form, headers);
+  assert.equal(valid.headers.get("location"), scope);
+  assert.ok(valid.headers.getSetCookie().some(value => value.startsWith("__Host-onesa-authenticator=;")));
+  const nextCookie = valid.headers.getSetCookie()[0].split(";")[0];
+  assert.equal((await call(scope, "GET", undefined, { cookie: nextCookie })).status, 200);
+  assert.equal((await call(path, "POST", form, headers)).status, 403);
+  const stored = store.one("SELECT ciphertext,last_counter FROM account_authenticators WHERE id=?", admin.id);
+  assert.ok(stored.ciphertext && !stored.ciphertext.includes(setupKey) && !stored.ciphertext.includes(raw.toString("base64url")));
+  const later = await start(nextCookie);
+  const laterCookie = later.headers.getSetCookie()[0].split(";")[0];
+  const laterHeaders = { cookie: nextCookie + "; " + laterCookie, origin: env.origin };
+  const challenge = await (await call(path, "GET", undefined, laterHeaders)).text();
+  assert.match(challenge, /Enter your authenticator code/);
+  assert.doesNotMatch(challenge, /Authenticator setup key/);
+  const nextCsrf = challenge.match(/name="csrf" value="([^"]+)"/)[1];
+  const previousCode = authenticatorCode(raw, stored.last_counter);
+  assert.equal((await call(path, "POST", new URLSearchParams({ csrf: nextCsrf, code: previousCode }).toString(), laterHeaders)).status, 400);
 });
 
 test("Portal administrator has no Identity access; stale MFA and forged form denied", async (t) => {

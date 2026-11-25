@@ -1,6 +1,7 @@
 import * as oidc from "openid-client";
 import { infrastructureEntry, isRegistrationEntry, pasofiHotspotEntry, returnKey } from "./registration-returns.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import { accountAuthenticator } from "./authenticator.js";
 import {
   secret, digest, Rejected, products, accountProducts, registrations,
   productAdministratorRequests, sharedRole, configurableAdminRoles,
@@ -272,12 +273,16 @@ export function authClient(env, transport) {
         expectedState: challenge.state,
         pkceCodeVerifier: challenge.verifier,
         idTokenExpected: true,
+        ...(new URL(challenge.destination, env.origin).searchParams.has("_factor") ? { maxAge: 300 } : {}),
       });
       return tokens.claims();
     },
   };
 }
 export function createApp(store, env, client = authClient(env)) {
+  const authenticator = env.authenticatorKey ? accountAuthenticator(store, env.authenticatorKey) : null;
+  const sessionLookup = `SELECT s.*,a.email,a.status AS state FROM sessions s JOIN accounts a USING(id)
+    WHERE hash=? AND expires>? AND a.status IN ('active','pending')`;
   const returns = env.registrationReturns ?? new Map();
   function browserResumes(req) {
     return store.all("SELECT state,destination FROM registration_resumes WHERE hash=? AND expires>? ORDER BY expires DESC",
@@ -613,11 +618,22 @@ export function createApp(store, env, client = authClient(env)) {
       const factor = identity[mfaClaim] * 1000;
       const factorVerified = Number.isSafeInteger(identity[mfaClaim]) && freshFactor(factor, now);
       const startedAt = Math.floor((flow.expires - 300000) / 1000) * 1000;
-      if (requiresFactor && (!factorVerified || factor < startedAt)) return factorVerification(
-        "Second factor not verified",
-        retryPath(flow.destination, env.origin),
-        "Onesa sign-in did not confirm an authenticator check. Try again. If no authenticator prompt appears, contact your Onesa administrator.",
-      );
+      if (requiresFactor && (!factorVerified || factor < startedAt)) {
+        const sessionHash = digest(readCookie(req, "session"));
+        const previous = store.one(sessionLookup, sessionHash, now);
+        const verified = store.lookup(env.issuer, identity.sub);
+        if (authenticator && previous && verified?.id === previous.id && previous.state === "active") {
+          const attempt = authenticator.start(sessionHash, previous.id, target.pathname + target.search + target.hash, now);
+          const cookies = [cookie("authenticator", attempt, 300)];
+          if (stateCookie) cookies.push(cookie("flow-" + state, "", 0));
+          return redirect("/account/authenticator", cookies);
+        }
+        return factorVerification(
+          "Second factor not verified",
+          retryPath(flow.destination, env.origin),
+          "Onesa sign-in did not confirm an authenticator check. Open My account and sign in with the account you want to verify.",
+        );
+      }
       const product = target.searchParams.get("product");
       const tier = target.searchParams.get("enrollment");
       const destination = product && tier && returns.get(returnKey(
@@ -657,11 +673,35 @@ export function createApp(store, env, client = authClient(env)) {
       }
       return redirect(destination || (target.pathname + target.search + target.hash), cookies);
     }
-    const session = store.one(
-      "SELECT s.*,a.email,a.status AS state FROM sessions s JOIN accounts a USING(id) WHERE hash=? AND expires>? AND a.status IN ('active','pending')",
-      digest(readCookie(req, "session")),
-      Date.now(),
-    );
+    const sessionHash = digest(readCookie(req, "session"));
+    const session = store.one(sessionLookup, sessionHash, Date.now());
+    if (p === "/account/authenticator" && ["GET", "POST"].includes(method)) {
+      if (!authenticator || !session || session.state !== "active")
+        return page("Sign in to verify your identity", '<a href="/account">Open My account</a>', 403);
+      const token = readCookie(req, "authenticator");
+      const now = Date.now();
+      const view = authenticator.view(token, sessionHash, session.id, now);
+      if (!view) return page("Verification expired", '<a href="/account#account-security">Start a fresh verification</a>', 400);
+      if (view.locked) return page("Wait before trying again", '<p>Too many codes were entered. Wait ten minutes, then start a fresh verification.</p><a href="/account#account-security">Return to account security</a>', 429);
+      let feedback = "";
+      if (method === "POST") {
+        const input = new URLSearchParams(await req.text());
+        if (req.headers.get("origin") !== env.origin || !compare(input.get("csrf"), session.csrf))
+          return page("Verification request expired", '<a href="/account#account-security">Return to account security</a>', 403);
+        const result = authenticator.verify(token, sessionHash, session.id, input.get("code") ?? "", now);
+        if (result.status === "verified") return redirect(result.destination, [
+          cookie("session", result.session, 1800), cookie("authenticator", "", 0),
+        ]);
+        feedback = '<p role="alert">That code could not be verified. Check the current code in your authenticator app.</p>';
+      }
+      const setup = view.setupKey ? '<p>Add a time-based account called Onesa to your authenticator app using this setup key.</p>' +
+        '<p><code aria-label="Authenticator setup key">' + esc(view.setupKey) + '</code></p>' : "";
+      return page(view.setupKey ? "Set up your authenticator" : "Enter your authenticator code",
+        '<p>Verifying <strong>' + esc(session.email) + '</strong></p>' + setup + feedback +
+        post("/account/authenticator", session.csrf,
+          '<label>Six-digit code<input name="code" required inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6"></label> ' +
+          '<button class="primary">Verify and continue</button>'), feedback ? 400 : 200);
+    }
     if (p === "/account/closure" && method === "GET") {
       const destination = "/account#account-closure";
       return redirect(session ? destination : "/login?return=" + encodeURIComponent(destination));
