@@ -82,6 +82,26 @@ test("refresh, no MFA and lookalike ACR requests never start a challenge or mint
   }
 });
 
+test("PasoFi renewal reassesses the product grant without minting fresh MFA evidence", async t => {
+  let permitted = true;
+  t.mock.method(globalThis,"fetch",async () => permitted
+    ? Response.json({...decision,product:"pasofi",roles:["agent"],require_mfa:true})
+    : new Response(null,{status:403}));
+  const renewal = fixture();
+  renewal.transaction.protocol = "oauth2-refresh-token";
+  renewal.event.authentication.methods = [];
+  await policy.onExecutePostLogin(renewal.event,renewal.api);
+  assert.deepEqual(renewal.denials,[]);
+  assert.deepEqual(renewal.claims[ns+"roles"],["agent"]);
+  assert.equal(renewal.claims[ns+"mfa_time"],undefined);
+  permitted=false;
+  const revoked=fixture();
+  revoked.transaction.protocol="oauth2-refresh-token";
+  await policy.onExecutePostLogin(revoked.event,revoked.api);
+  assert.equal(revoked.denials.length,1);
+  assert.deepEqual(revoked.claims,{});
+});
+
 test("operation requires the browser code flow, reauthentication, nonce, and existing enrollment", async () => {
   for (const modify of [
     f => { f.transaction.protocol = "oauth2-password"; },
