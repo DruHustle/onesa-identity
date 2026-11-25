@@ -150,7 +150,13 @@ async function applyPolicy(event, api, continuing = false) {
     if (continuing) {
       body.receipt = event.request?.body?.onesa_factor_receipt;
       body.state = event.request?.query?.state ?? event.request?.body?.state;
-      if (typeof body.receipt !== "string" || typeof body.state !== "string") return deny();
+      if ((body.receipt !== undefined && typeof body.receipt !== "string") || typeof body.state !== "string") return deny();
+    } else {
+      body.continuation = "state";
+      body.allowEnrollment = (event.authentication?.methods || []).some(method => {
+        const authenticated = Date.parse(method.timestamp);
+        return method.name === "pwd" && authenticated <= Date.now() && Date.now() - authenticated <= 300000;
+      });
     }
     try {
       const response = await fetch(policyOrigin + "/internal/pasofi-authenticator/" + phase, {
@@ -215,5 +221,5 @@ async function applyPolicy(event, api, continuing = false) {
     api.accessToken.setCustomClaim(ns + name, value);
 }
 
-exports.onExecutePostLogin = (event, api) => applyPolicy(event, api);
-exports.onContinuePostLogin = (event, api) => applyPolicy(event, api, true);
+exports.onExecutePostLogin = async function (event, api) { return applyPolicy(event, api); };
+exports.onContinuePostLogin = async function (event, api) { return applyPolicy(event, api, true); };

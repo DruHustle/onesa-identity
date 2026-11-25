@@ -107,53 +107,67 @@ export function accountAuthenticator(store, key) {
         return { status: "verified", destination: flow.destination, session };
       });
     },
-    startPasoFi(id, client, audience, now) {
+    startPasoFi(id, client, audience, now, continuation, allowEnrollment) {
       const ticket = secret();
+      const mode = continuation === "state" ? "state" : "receipt";
+      const enrollment = mode === "state" && allowEnrollment === true &&
+        !store.one("SELECT 1 FROM account_authenticators WHERE id=?", id) ? seal(randomBytes(20), id) : null;
       store.run("DELETE FROM pasofi_authenticator_flows WHERE expires<=?", now);
-      store.run("INSERT INTO pasofi_authenticator_flows(ticket_hash,id,client,audience,expires) VALUES(?,?,?,?,?)",
-        digest(ticket), id, client, audience, now + validity);
+      store.run(`INSERT INTO pasofi_authenticator_flows(ticket_hash,id,client,audience,expires,continuation,enrollment)
+        VALUES(?,?,?,?,?,?,?)`, digest(ticket), id, client, audience, now + validity, mode, enrollment);
       return ticket;
     },
     bindPasoFi(ticket, state, now) {
       const browser = secret();
       const updated = store.run(`UPDATE pasofi_authenticator_flows SET browser_hash=?,state=?,csrf=?
-        WHERE ticket_hash=? AND expires>? AND browser_hash IS NULL`,
-      digest(browser), state, secret(), digest(ticket), now);
+        WHERE ticket_hash=? AND expires>? AND browser_hash IS NULL
+          AND NOT EXISTS (SELECT 1 FROM pasofi_authenticator_flows WHERE state=? AND expires>?)`,
+      digest(browser), state, secret(), digest(ticket), now, state, now);
       return updated.changes ? browser : null;
     },
     showPasoFi(browser, now) {
-      return store.one(`SELECT f.id,f.csrf,a.email,p.ciphertext IS NOT NULL AS enrolled
+      const flow = store.one(`SELECT f.id,f.csrf,a.email,f.continuation,f.enrollment,p.ciphertext IS NOT NULL AS enrolled
         FROM pasofi_authenticator_flows f JOIN accounts a ON a.id=f.id AND a.status='active'
         LEFT JOIN account_authenticators p ON p.id=f.id
         WHERE f.browser_hash=? AND f.expires>? AND f.verified_at IS NULL`, digest(browser), now);
+      return flow && { csrf: flow.csrf, email: flow.email, enrolled: flow.enrolled, continuation: flow.continuation,
+        setupKey: !flow.enrolled && flow.enrollment ? base32(open(flow.enrollment, flow.id)) : null };
     },
     verifyPasoFi(browser, code, now) {
       return store.atomic(() => {
-        const flow = store.one(`SELECT f.id,f.state,f.attempts,p.ciphertext,p.last_counter,l.failures
-          FROM pasofi_authenticator_flows f JOIN account_authenticators p ON p.id=f.id
+        const flow = store.one(`SELECT f.id,f.state,f.continuation,f.enrollment,f.attempts,p.ciphertext,p.last_counter,l.failures
+          FROM pasofi_authenticator_flows f LEFT JOIN account_authenticators p ON p.id=f.id
           JOIN accounts a ON a.id=f.id AND a.status='active'
           LEFT JOIN account_authenticator_limits l ON l.id=f.id AND l.ends_at>?
           WHERE f.browser_hash=? AND f.expires>? AND f.verified_at IS NULL`, now, digest(browser), now);
-        if (!flow) return {status:"expired"};
+        if (!flow || (!flow.ciphertext && !flow.enrollment)) return {status:"expired"};
         if (flow.attempts >= 5 || (flow.failures ?? 0) >= 10) return {status:"limited"};
         if (!/^\d{6}$/.test(code)) return {status:"invalid"};
-        const approved = matchCode(flow.ciphertext, flow.id, flow.last_counter, code, now);
+        const approved = matchCode(flow.ciphertext ?? flow.enrollment, flow.id, flow.last_counter, code, now);
         if (approved === undefined) {
           store.run("UPDATE pasofi_authenticator_flows SET attempts=attempts+1 WHERE browser_hash=?", digest(browser));
           recordFailure(flow.id, now);
           return {status:"invalid"};
         }
-        const receipt = secret();
-        store.run("UPDATE account_authenticators SET last_counter=? WHERE id=?", approved, flow.id);
+        const receipt = flow.continuation === "receipt" ? secret() : null;
+        if (flow.ciphertext)
+          store.run("UPDATE account_authenticators SET last_counter=? WHERE id=?", approved, flow.id);
+        else {
+          store.run("INSERT INTO account_authenticators VALUES(?,?,?,?)", flow.id, flow.enrollment, approved, now);
+          store.audit(flow.id, "authenticator-enrolled", flow.id, { product: "pasofi" });
+        }
         store.run("DELETE FROM account_authenticator_limits WHERE id=?", flow.id);
-        store.run("UPDATE pasofi_authenticator_flows SET verified_at=?,receipt_hash=? WHERE browser_hash=?", now,digest(receipt),digest(browser));
+        store.run("UPDATE pasofi_authenticator_flows SET verified_at=?,receipt_hash=?,enrollment=NULL WHERE browser_hash=?",
+          now, receipt ? digest(receipt) : null, digest(browser));
         return {status:"verified",state:flow.state,receipt};
       });
     },
     finishPasoFi(id, client, audience, state, receipt, now) {
+      const receiptHash = receipt ? digest(receipt) : null;
       return store.one(`DELETE FROM pasofi_authenticator_flows WHERE id=? AND client=? AND audience=?
-        AND state=? AND receipt_hash=? AND verified_at>? AND expires>? RETURNING verified_at`,
-      id, client, audience, state, digest(receipt), now-validity, now);
+        AND state=? AND ((continuation='state' AND ? IS NULL) OR (continuation='receipt' AND receipt_hash=?))
+        AND verified_at>? AND expires>? RETURNING verified_at`,
+      id, client, audience, state, receiptHash, receiptHash, now-validity, now);
     },
   };
 }

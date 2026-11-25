@@ -162,7 +162,9 @@ export function openStore(path, { existingOnly = false } = {}) {
       client TEXT NOT NULL, audience TEXT NOT NULL, expires INTEGER NOT NULL,
       browser_hash TEXT UNIQUE, state TEXT, csrf TEXT,
       attempts INTEGER NOT NULL DEFAULT 0, verified_at INTEGER,
-      receipt_hash TEXT UNIQUE
+      receipt_hash TEXT UNIQUE,
+      continuation TEXT NOT NULL DEFAULT 'receipt' CHECK(continuation IN ('receipt','state')),
+      enrollment TEXT
     );
     CREATE INDEX IF NOT EXISTS pasofi_authenticator_flow_expiry ON pasofi_authenticator_flows(expires);
     CREATE TABLE IF NOT EXISTS recovery_limit(id TEXT PRIMARY KEY REFERENCES accounts, next INTEGER NOT NULL);
@@ -181,6 +183,14 @@ export function openStore(path, { existingOnly = false } = {}) {
   const one = (q, ...a) => db.prepare(q).get(...a);
   const all = (q, ...a) => db.prepare(q).all(...a);
   const run = (q, ...a) => db.prepare(q).run(...a);
+
+  atomic(() => {
+    const columns = new Set(all("PRAGMA table_info(pasofi_authenticator_flows)").map(row => row.name));
+    if (!columns.has("continuation"))
+      db.exec("ALTER TABLE pasofi_authenticator_flows ADD COLUMN continuation TEXT NOT NULL DEFAULT 'receipt' CHECK(continuation IN ('receipt','state'))");
+    if (!columns.has("enrollment"))
+      db.exec("ALTER TABLE pasofi_authenticator_flows ADD COLUMN enrollment TEXT");
+  });
 
   // Upgrade existing audit tables atomically. A partially present chain is
   // rejected rather than silently re-hashed, which could conceal tampering.

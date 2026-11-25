@@ -1277,6 +1277,46 @@ test("active Onesa administrators can enroll and verify a local authenticator af
   assert.equal((await exchange("finish",{...detail,receipt,state})).status,403);
 });
 
+test("PasoFi staff can enroll during app sign-in and return without a browser receipt", async t => {
+  const audience = "https://api.pasofi.onesa.test";
+  const resources = new Map([[audience, { product: "pasofi", clients: ["pasofi-web"] }]]);
+  const { call, store, admin } = await fixture(t, { authenticatorKey: Buffer.alloc(32, 8), resources });
+  const actor = store.register(env.issuer, "oidc|staff-enrollment", "staff-enrollment@example.test");
+  store.change(admin.id, actor.id, actor.revision, { kind: "status", status: "active" });
+  const step = "/account/pasofi-authenticator";
+  const body = { subject: "oidc|staff-enrollment", clientId: "pasofi-web", audience, continuation: "state" };
+  const service = (phase, values) => call("/internal/pasofi-authenticator/" + phase, "POST",
+    JSON.stringify({ ...body, ...values }), { authorization: "Bearer " + env.policyKey });
+  const state = "state-from-the-original-auth0-transaction";
+  const { ticket } = (await (await service("start", { allowEnrollment: true })).json());
+  const begun = await call(step + "?ticket=" + ticket + "&state=" + state);
+  const cookies = { cookie: begun.headers.getSetCookie()[0].split(";")[0], origin: env.origin };
+  const duplicate = (await (await service("start", { allowEnrollment: true })).json()).ticket;
+  assert.equal((await call(step + "?ticket=" + duplicate + "&state=" + state)).status, 400);
+  const before = await call(step, "GET", undefined, cookies);
+  assert.equal(before.status, 200);
+  const html = await before.text();
+  assert.match(html, /Set up your PasoFi authenticator/);
+  assert.match(html, /data:image\/gif/);
+  const setupKey = html.match(/aria-label="Authenticator setup key">([A-Z2-7]+)</)[1];
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const bits = Array.from(setupKey, char => alphabet.indexOf(char).toString(2).padStart(5, "0")).join("");
+  const code = authenticatorCode(Buffer.from(bits.match(/[01]{8}/g).map(value => parseInt(value, 2))), Math.floor(Date.now() / 30000));
+  const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
+  const form = new URLSearchParams({ csrf, code }).toString();
+  assert.equal((await service("finish", { state })).status, 403);
+  assert.equal((await call(step, "POST", form, { ...cookies, origin: "null" })).status, 403);
+  const verified = await call(step, "POST", form, cookies);
+  assert.equal(verified.status, 303);
+  assert.equal(verified.headers.get("location"), new URL("/continue?state=" + state, env.issuer).href);
+  assert.equal(verified.headers.get("referrer-policy"), "no-referrer");
+  assert.equal((await service("finish", { state: state + "-wrong" })).status, 403);
+  assert.equal((await service("finish", { state, receipt: "R".repeat(43) })).status, 403);
+  assert.equal((await service("finish", { state })).status, 200);
+  assert.equal((await service("finish", { state })).status, 403);
+  assert.ok(store.one("SELECT 1 FROM account_authenticators WHERE id=?", actor.id));
+});
+
 test("Portal administrator has no Identity access; stale MFA and forged form denied", async (t) => {
   const { store, call, login } = await fixture(t),
     a = store.register(env.issuer, "oidc|portal", "portal@onesa.test");

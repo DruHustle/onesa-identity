@@ -103,8 +103,9 @@ test("PasoFi renewal reassesses the product grant without minting fresh MFA evid
 });
 
 test("interactive PasoFi staff sign-in requires the one-use Authenticator continuation", async t => {
-  const ticket = "A".repeat(43), receipt = "R".repeat(43), state = "original-provider-state-a";
+  const ticket = "A".repeat(43), state = "original-provider-state-a";
   let consumed = false;
+  let allowEnrollment = true;
   t.mock.method(globalThis,"fetch",async (url, options) => {
     const location = new URL(url);
     const body = JSON.parse(options.body);
@@ -113,25 +114,33 @@ test("interactive PasoFi staff sign-in requires the one-use Authenticator contin
     assert.equal(body.subject,"auth0|test");
     assert.equal(body.clientId,"portal-client");
     assert.equal(body.audience,"https://api.portal.onesa.test");
-    if(location.pathname.endsWith("/start"))return Response.json({ticket});
-    if(consumed || body.receipt!==receipt || body.state!==state)return new Response(null,{status:403});
+    if(location.pathname.endsWith("/start")) {
+      assert.equal(body.continuation, "state");
+      assert.equal(body.allowEnrollment, allowEnrollment);
+      return Response.json({ticket});
+    }
+    if(consumed || body.receipt!==undefined || body.state!==state)return new Response(null,{status:403});
     consumed=true;
     return Response.json({mfaTime:Math.floor(Date.now()/1000)});
   });
   const f=fixture();
   f.transaction.acr_values=[mfa];
-  f.event.authentication.methods=[];
+  f.event.authentication.methods=[{ name: "pwd", timestamp: new Date().toISOString() }];
   const redirects=[];
   f.api.redirect={canRedirect:()=>true,sendUserTo:(url,params)=>redirects.push([url,params])};
   await policy.onExecutePostLogin(f.event,f.api);
   assert.deepEqual(redirects,[["https://identity.onesa.test/account/pasofi-authenticator",{query:{ticket}}]]);
   assert.deepEqual(f.claims,{});
-  f.event.request.body={onesa_factor_receipt:receipt,state};
+  f.event.request.query={state};
   await policy.onContinuePostLogin(f.event,f.api);
   assert.equal(f.claims[ns+"products"][0],"pasofi");
   assert.ok(f.claims[ns+"mfa_time"]);
   await policy.onContinuePostLogin(f.event,f.api);
   assert.equal(f.denials.length,1);
+  allowEnrollment = false;
+  f.event.authentication.methods = [{ name: "pwd", timestamp: new Date(Date.now() - 360000).toISOString() }];
+  await policy.onExecutePostLogin(f.event,f.api);
+  assert.equal(redirects.length, 2);
 });
 
 test("operation requires the browser code flow, reauthentication, nonce, and existing enrollment", async () => {

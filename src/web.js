@@ -283,6 +283,19 @@ function factorVerification(title, destination, message, status = 403) {
   return page(title, '<p>' + esc(message) + '</p><p><a class="primary" href="' +
     esc(destination) + '">Verify with your authenticator</a></p>', status);
 }
+function authenticatorSetup(email, key) {
+  if (!key) return "";
+  const account = encodeURIComponent(email.replaceAll(":", " "));
+  const qr = qrcode(0, "M");
+  qr.addData("otpauth://totp/Onesa:" + account + "?secret=" + key + "&issuer=Onesa");
+  qr.make();
+  return '<div class="authenticator-setup">' +
+    '<p>Open your authenticator app, add an account, and scan this QR code. Then enter the six-digit code it shows.</p>' +
+    '<img class="authenticator-qr" src="' + qr.createDataURL(5) + '" alt="Onesa authenticator setup QR code">' +
+    '<details class="authenticator-manual"><summary>Enter a setup key instead</summary>' +
+    '<p>Add a time-based account called Onesa using this key.</p>' +
+    '<p><code aria-label="Authenticator setup key">' + esc(key) + '</code></p></details></div>';
+}
 async function sendVerificationEmail(verification, subject, accountClient) {
   const options = {
     method: "POST",
@@ -474,14 +487,16 @@ export function createApp(store, env, client = authClient(env)) {
     if (["/internal/pasofi-authenticator/start", "/internal/pasofi-authenticator/finish"].includes(p) && method === "POST") {
       if (!authenticator || !compare(req.headers.get("authorization"), "Bearer " + env.policyKey))
         return new Response(null, { status: 401 });
-      const { subject, clientId, audience, receipt, state } = await req.json();
+      const { subject, clientId, audience, receipt, state, continuation, allowEnrollment } = await req.json();
       const resource = env.resources.get(audience);
       const actor = typeof subject === "string" && subject.length <= 512 && store.lookup(env.issuer, subject);
       if (!actor || actor.status !== "active" || resource?.product !== "pasofi" || !resource.clients.includes(clientId))
         return new Response(null, { status: 403 });
       const now = Date.now();
-      if (p.endsWith("/start")) return Response.json({ ticket: authenticator.startPasoFi(actor.id, clientId, audience, now) });
-      if (typeof receipt !== "string" || !/^[\w-]{43}$/.test(receipt) || typeof state !== "string" || !/^[\w.~\-]{16,1024}$/.test(state))
+      if (p.endsWith("/start"))
+        return Response.json({ ticket: authenticator.startPasoFi(actor.id, clientId, audience, now, continuation, allowEnrollment) });
+      if ((receipt !== undefined && (typeof receipt !== "string" || !/^[\w-]{43}$/.test(receipt))) ||
+          typeof state !== "string" || !/^[\w.~\-]{16,1024}$/.test(state))
         return new Response(null, { status: 403 });
       const proof = authenticator.finishPasoFi(actor.id, clientId, audience, state, receipt, now);
       return proof ? Response.json({ mfaTime: Math.floor(proof.verified_at / 1000) }) : new Response(null, { status: 403 });
@@ -502,8 +517,12 @@ export function createApp(store, env, client = authClient(env)) {
       const browser = readCookie(req, "pasofi-authenticator");
       const flow = authenticator.showPasoFi(browser, now);
       if (!flow) return page("Staff sign-in expired", '<a href="https://pasofi.mobile.onesa.eu/#staff">Return to PasoFi Staff</a>', 400);
-      if (!flow.enrolled) return page("Set up your authenticator first",
-        '<p>Set up your authenticator in Onesa Account with the same account you use for PasoFi Staff.</p><a class="primary" href="/account#account-security">Open account security</a>', 403);
+      if (!flow.enrolled && !flow.setupKey) {
+        if (flow.continuation === "state") return page("Start a fresh PasoFi sign-in",
+          '<p>Confirm your Onesa sign-in from PasoFi before adding an authenticator.</p><a class="primary" href="https://pasofi.mobile.onesa.eu/#staff">Return to PasoFi Staff</a>', 403);
+        return page("Set up your authenticator first",
+          '<p>Set up your authenticator in Onesa Account with the same account you use for PasoFi Staff.</p><a class="primary" href="/account#account-security">Open account security</a>', 403);
+      }
       let feedback = "";
       if (method === "POST") {
         const input = new URLSearchParams(await req.text());
@@ -513,9 +532,14 @@ export function createApp(store, env, client = authClient(env)) {
         if (outcome.status === "verified") {
           const next = new URL("/continue", env.issuer);
           next.searchParams.set("state", outcome.state);
+          if (!outcome.receipt) {
+            const response = redirect(next.href, [cookie("pasofi-authenticator", "", 0)]);
+            response.headers.set("referrer-policy", "no-referrer");
+            return response;
+          }
           const response = page("Authenticator verified",
             '<form method="post" action="' + esc(next.href) + '">' +
-            hidden("state", outcome.state) + hidden("onesa_factor_receipt", outcome.receipt) +
+            hidden("onesa_factor_receipt", outcome.receipt) +
             '<button class="primary">Continue to PasoFi Staff</button></form>');
           response.headers.set("referrer-policy", "no-referrer");
           response.headers.append("set-cookie", cookie("pasofi-authenticator", "", 0));
@@ -525,10 +549,12 @@ export function createApp(store, env, client = authClient(env)) {
           '<p>Too many codes were entered. Start a fresh staff sign-in after ten minutes.</p>', 429);
         feedback = '<p role="alert">That code could not be verified. Check the current code in your authenticator app.</p>';
       }
-      return page("Verify PasoFi staff sign-in", '<p>Verifying <strong>' + esc(flow.email) + '</strong></p>' + feedback +
+      return page(flow.setupKey ? "Set up your PasoFi authenticator" : "Verify PasoFi staff sign-in",
+        '<p>Verifying <strong><!--email_off-->' + esc(flow.email) + '<!--/email_off--></strong></p>' +
+        authenticatorSetup(flow.email, flow.setupKey) + feedback + '<div class="authenticator-verification">' +
         post(pasoFiFactorPath, flow.csrf,
-          '<label>Six-digit code<input name="code" required pattern="[0-9]{6}" maxlength="6" inputmode="numeric" autocomplete="one-time-code"></label> ' +
-          '<button class="primary">Verify code</button>'), feedback ? 400 : 200);
+          '<label>Six-digit code<input name="code" required pattern="[0-9]{6}" maxlength="6" inputmode="numeric" autocomplete="one-time-code"></label>' +
+          '<button class="primary">Verify and continue</button>') + '</div>', feedback ? 400 : 200);
     }
     if (p === "/internal/decision" && method === "POST") {
       if (!compare(req.headers.get("authorization"), "Bearer " + env.policyKey))
@@ -845,21 +871,9 @@ export function createApp(store, env, client = authClient(env)) {
         ]);
         feedback = '<p role="alert">That code could not be verified. Check the current code in your authenticator app.</p>';
       }
-      let setup = "";
-      if (view.setupKey) {
-        const account = encodeURIComponent(session.email.replaceAll(":", " "));
-        const qr = qrcode(0, "M");
-        qr.addData("otpauth://totp/Onesa:" + account + "?secret=" + view.setupKey + "&issuer=Onesa");
-        qr.make();
-        setup = '<div class="authenticator-setup">' +
-          '<p>Open your authenticator app, add an account, and scan this QR code. Then enter the six-digit code it shows.</p>' +
-          '<img class="authenticator-qr" src="' + qr.createDataURL(5) + '" alt="Onesa authenticator setup QR code">' +
-          '<details class="authenticator-manual"><summary>Enter a setup key instead</summary>' +
-          '<p>Add a time-based account called Onesa using this key.</p>' +
-          '<p><code aria-label="Authenticator setup key">' + esc(view.setupKey) + '</code></p></details></div>';
-      }
       return page(view.setupKey ? "Set up your authenticator" : "Enter your authenticator code",
-        '<p>Verifying <strong>' + esc(session.email) + '</strong></p>' + setup + feedback +
+        '<p>Verifying <strong><!--email_off-->' + esc(session.email) + '<!--/email_off--></strong></p>' +
+        authenticatorSetup(session.email, view.setupKey) + feedback +
         '<div class="authenticator-verification">' + post("/account/authenticator", session.csrf,
           '<label>Six-digit code<input name="code" required inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6"></label>' +
           '<button class="primary">Verify and continue</button>') + '</div>', feedback ? 400 : 200);
@@ -1299,7 +1313,7 @@ export function createApp(store, env, client = authClient(env)) {
     response.headers.set(
       "content-security-policy",
       "default-src 'none'; img-src https://onesa.eu/brand/icons/v1/onesa-company-180.png" +
-      (accountVerification ? " data:" : "") + "; style-src 'unsafe-inline'; form-action 'self'" +
+      (accountVerification || staffVerification ? " data:" : "") + "; style-src 'unsafe-inline'; form-action 'self'" +
       (staffVerification ? " " + new URL(env.issuer).origin : "") + "; frame-ancestors 'none'; base-uri 'none'",
     );
     return response;
