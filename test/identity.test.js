@@ -1181,7 +1181,10 @@ test("active Onesa administrators can enroll and verify a local authenticator af
   const stepUp = "/step-up?return=" + encodeURIComponent(scope);
   async function start(accountCookie, subject = "oidc|identity-admin") {
     const response = await call(stepUp, "GET", undefined, { cookie: accountCookie });
+    if (response.headers.get("location") === path) return response;
     const param = new URL(response.headers.get("location")).searchParams;
+    assert.equal(param.get("prompt"), "none");
+    assert.equal(param.get("max_age"), "1800");
     const attempt = response.headers.getSetCookie()[0].split(";")[0];
     setRedeem(async () => ({ iss: env.issuer, sub: subject, email: "identity-admin@onesa.test", email_verified: true }));
     return call("/callback?code=controlled&state=" + param.get("state"), "GET", undefined, {
@@ -1190,6 +1193,16 @@ test("active Onesa administrators can enroll and verify a local authenticator af
   }
   const mismatch = await start(original.cookie, "oidc|different");
   assert.equal(mismatch.status, 403);
+  const expiredProvider = await call(stepUp, "GET", undefined, { cookie: original.cookie });
+  const oauthState = new URL(expiredProvider.headers.get("location")).searchParams.get("state");
+  const retryCookie = expiredProvider.headers.getSetCookie()[0].split(";")[0];
+  const fallback = await call("/callback?error=login_required&state=" + oauthState, "GET", undefined, {
+    cookie: original.cookie + "; " + retryCookie,
+  });
+  assert.equal(fallback.status, 401);
+  assert.match(await fallback.text(), /confirm_sign_in=1/);
+  const interactive = await call(stepUp + "&confirm_sign_in=1", "GET", undefined, { cookie: original.cookie });
+  assert.equal(new URL(interactive.headers.get("location")).searchParams.get("prompt"), "login");
   const started = await start(original.cookie);
   assert.equal(started.headers.get("location"), path);
   const factor = started.headers.getSetCookie()[0].split(";")[0];
@@ -1215,6 +1228,7 @@ test("active Onesa administrators can enroll and verify a local authenticator af
   const stored = store.one("SELECT ciphertext,last_counter FROM account_authenticators WHERE id=?", admin.id);
   assert.ok(stored.ciphertext && !stored.ciphertext.includes(setupKey) && !stored.ciphertext.includes(raw.toString("base64url")));
   const later = await start(nextCookie);
+  assert.equal(later.headers.get("location"),path);
   const laterCookie = later.headers.getSetCookie()[0].split(";")[0];
   const laterHeaders = { cookie: nextCookie + "; " + laterCookie, origin: env.origin };
   const challenge = await (await call(path, "GET", undefined, laterHeaders)).text();
