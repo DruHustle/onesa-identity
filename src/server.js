@@ -124,6 +124,9 @@ export function configuration(env) {
       clientSecret: credential("AUTH0_VERIFICATION_CLIENT_SECRET"),
     };
   }
+  const authenticatorKey = env.IDENTITY_AUTHENTICATOR_KEY_FILE ? credential("IDENTITY_AUTHENTICATOR_KEY") : undefined;
+  if (authenticatorKey && !/^[a-fA-F0-9]{64}$/.test(authenticatorKey))
+    throw Error("Expected a 256-bit authenticator encryption key");
   return {
     issuer: issuer.href,
     origin: origin.origin,
@@ -136,6 +139,7 @@ export function configuration(env) {
     connection: env.AUTH0_DATABASE_CONNECTION,
     auth0LogoutEnabled: env.AUTH0_LOGOUT_ENABLED === "true",
     verification,
+    authenticatorKey: authenticatorKey ? Buffer.from(authenticatorKey, "hex") : undefined,
   };
 }
 

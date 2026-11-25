@@ -1,0 +1,10 @@
+services:
+  identity:
+    environment:
+      IDENTITY_AUTHENTICATOR_KEY_FILE: /run/secrets/authenticator_key
+    secrets:
+      - authenticator_key
+
+secrets:
+  authenticator_key:
+    file: "${IDENTITY_AUTHENTICATOR_KEY_PATH:?Set the protected path to the dedicated 256-bit authenticator key}"
