@@ -1171,7 +1171,10 @@ test("scoped authenticator verification survives other tabs and stops when the p
 });
 
 test("active Onesa administrators can enroll and verify a local authenticator after fresh provider sign-in", async t => {
-  const { call, login, setRedeem, store, admin } = await fixture(t, { authenticatorKey: Buffer.alloc(32, 5) });
+  const audience = "https://api.pasofi.onesa.test";
+  const resources = new Map(env.resources);
+  resources.set(audience, {product:"pasofi",clients:["pasofi-web"]});
+  const { call, login, setRedeem, store, admin } = await fixture(t, { authenticatorKey: Buffer.alloc(32, 5), resources });
   const original = await login("identity-admin", "/admin", Date.now() - 600000);
   const scope = "/admin?product=pasofi";
   const path = "/account/authenticator";
@@ -1220,6 +1223,34 @@ test("active Onesa administrators can enroll and verify a local authenticator af
   const nextCsrf = challenge.match(/name="csrf" value="([^"]+)"/)[1];
   const previousCode = authenticatorCode(raw, stored.last_counter);
   assert.equal((await call(path, "POST", new URLSearchParams({ csrf: nextCsrf, code: previousCode }).toString(), laterHeaders)).status, 400);
+  const staffPath = "/account/pasofi-authenticator";
+  const address = "/internal/pasofi-authenticator/";
+  const detail = {subject:"oidc|identity-admin",clientId:"pasofi-web",audience};
+  const policyHeaders = {authorization:"Bearer " + env.policyKey};
+  const exchange = (phase, body, headers = policyHeaders) => call(address + phase, "POST", JSON.stringify(body), headers);
+  assert.equal((await exchange("start",detail,{})).status,401);
+  assert.equal((await exchange("start",{...detail,clientId:"other-product"})).status,403);
+  const ticket = (await (await exchange("start",detail)).json()).ticket;
+  const state = "provider-state-abcdef-012345";
+  const entry = staffPath + "?ticket=" + ticket + "&state=" + state;
+  const bound = await call(entry);
+  assert.equal(bound.headers.get("location"),staffPath);
+  assert.equal((await call(entry)).status,400);
+  const staffCookie = bound.headers.getSetCookie()[0].split(";")[0];
+  const staffHeaders = {cookie:staffCookie,origin:env.origin};
+  const staffPage = await (await call(staffPath,"GET",undefined,staffHeaders)).text();
+  assert.match(staffPage,/Verify PasoFi staff sign-in/);
+  assert.doesNotMatch(staffPage,/Authenticator setup key/);
+  const staffCsrf = staffPage.match(/name="csrf" value="([^"]+)"/)[1];
+  const next = authenticatorCode(raw,stored.last_counter+1);
+  const verified = await call(staffPath,"POST",new URLSearchParams({csrf:staffCsrf,code:next}).toString(),staffHeaders);
+  assert.equal(verified.status,200);
+  const result = await verified.text();
+  assert.ok(result.includes('action="' + new URL("/continue?state="+state,env.issuer).href + '"'));
+  const receipt = result.match(/name="onesa_factor_receipt" value="([^"]+)"/)[1];
+  assert.equal((await exchange("finish",{...detail,receipt,state:"wrong-provider-state"})).status,403);
+  assert.equal((await exchange("finish",{...detail,receipt,state})).status,200);
+  assert.equal((await exchange("finish",{...detail,receipt,state})).status,403);
 });
 
 test("Portal administrator has no Identity access; stale MFA and forged form denied", async (t) => {

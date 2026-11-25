@@ -281,6 +281,7 @@ export function authClient(env, transport) {
 }
 export function createApp(store, env, client = authClient(env)) {
   const authenticator = env.authenticatorKey ? accountAuthenticator(store, env.authenticatorKey) : null;
+  const pasoFiFactorPath = "/account/pasofi-authenticator";
   const sessionLookup = `SELECT s.*,a.email,a.status AS state FROM sessions s JOIN accounts a USING(id)
     WHERE hash=? AND expires>? AND a.status IN ('active','pending')`;
   const returns = env.registrationReturns ?? new Map();
@@ -396,6 +397,64 @@ export function createApp(store, env, client = authClient(env)) {
         // Delivery is ambiguous after an upstream timeout. Retain the cooldown.
       }
       return new Response(null, { status: 503 });
+    }
+    if (["/internal/pasofi-authenticator/start", "/internal/pasofi-authenticator/finish"].includes(p) && method === "POST") {
+      if (!authenticator || !compare(req.headers.get("authorization"), "Bearer " + env.policyKey))
+        return new Response(null, { status: 401 });
+      const { subject, clientId, audience, receipt, state } = await req.json();
+      const resource = env.resources.get(audience);
+      const actor = typeof subject === "string" && subject.length <= 512 && store.lookup(env.issuer, subject);
+      if (!actor || actor.status !== "active" || resource?.product !== "pasofi" || !resource.clients.includes(clientId))
+        return new Response(null, { status: 403 });
+      const now = Date.now();
+      if (p.endsWith("/start")) return Response.json({ ticket: authenticator.startPasoFi(actor.id, clientId, audience, now) });
+      if (typeof receipt !== "string" || !/^[\w-]{43}$/.test(receipt) || typeof state !== "string" || !/^[\w.~\-]{16,1024}$/.test(state))
+        return new Response(null, { status: 403 });
+      const proof = authenticator.finishPasoFi(actor.id, clientId, audience, state, receipt, now);
+      return proof ? Response.json({ mfaTime: Math.floor(proof.verified_at / 1000) }) : new Response(null, { status: 403 });
+    }
+    if (p === pasoFiFactorPath && ["GET", "POST"].includes(method)) {
+      if (!authenticator) return page("Authenticator unavailable", '<a href="/account">Open Onesa Account</a>', 503);
+      const now = Date.now();
+      if (method === "GET" && url.searchParams.has("ticket")) {
+        const ticket = url.searchParams.get("ticket");
+        const state = url.searchParams.get("state") ?? "";
+        if (url.searchParams.getAll("ticket").length === 1 && url.searchParams.getAll("state").length === 1 &&
+            /^[\w-]{43}$/.test(ticket) && /^[\w.~\-]{16,1024}$/.test(state)) {
+          const browser = authenticator.bindPasoFi(ticket, state, now);
+          if (browser) return redirect(pasoFiFactorPath, [cookie("pasofi-authenticator", browser, 300)]);
+        }
+        return page("Staff sign-in expired", '<a href="https://pasofi.mobile.onesa.eu/#staff">Return to PasoFi Staff</a>', 400);
+      }
+      const browser = readCookie(req, "pasofi-authenticator");
+      const flow = authenticator.showPasoFi(browser, now);
+      if (!flow) return page("Staff sign-in expired", '<a href="https://pasofi.mobile.onesa.eu/#staff">Return to PasoFi Staff</a>', 400);
+      if (!flow.enrolled) return page("Set up your authenticator first",
+        '<p>Set up your authenticator in Onesa Account with the same account you use for PasoFi Staff.</p><a class="primary" href="/account#account-security">Open account security</a>', 403);
+      let feedback = "";
+      if (method === "POST") {
+        const input = new URLSearchParams(await req.text());
+        if (req.headers.get("origin") !== env.origin || !compare(input.get("csrf"), flow.csrf))
+          return page("Verification request expired", '<a href="https://pasofi.mobile.onesa.eu/#staff">Return to PasoFi Staff</a>', 403);
+        const outcome = authenticator.verifyPasoFi(browser, input.get("code") ?? "", now);
+        if (outcome.status === "verified") {
+          const next = new URL("/continue", env.issuer);
+          next.searchParams.set("state", outcome.state);
+          const response = page("Authenticator verified",
+            '<form method="post" action="' + esc(next.href) + '">' +
+            hidden("state", outcome.state) + hidden("onesa_factor_receipt", outcome.receipt) +
+            '<button class="primary">Continue to PasoFi Staff</button></form>');
+          response.headers.append("set-cookie", cookie("pasofi-authenticator", "", 0));
+          return response;
+        }
+        if (outcome.status === "limited") return page("Wait before trying again",
+          '<p>Too many codes were entered. Start a fresh staff sign-in after ten minutes.</p>', 429);
+        feedback = '<p role="alert">That code could not be verified. Check the current code in your authenticator app.</p>';
+      }
+      return page("Verify PasoFi staff sign-in", '<p>Verifying <strong>' + esc(flow.email) + '</strong></p>' + feedback +
+        post(pasoFiFactorPath, flow.csrf,
+          '<label>Six-digit code<input name="code" required pattern="[0-9]{6}" maxlength="6" inputmode="numeric" autocomplete="one-time-code"></label> ' +
+          '<button class="primary">Verify code</button>'), feedback ? 400 : 200);
     }
     if (p === "/internal/decision" && method === "POST") {
       if (!compare(req.headers.get("authorization"), "Bearer " + env.policyKey))
@@ -1124,11 +1183,13 @@ export function createApp(store, env, client = authClient(env)) {
       }
     }
     response.headers.set("cache-control", "no-store");
-    response.headers.set("referrer-policy", "same-origin");
+    const staffVerification = new URL(req.url).pathname === pasoFiFactorPath;
+    response.headers.set("referrer-policy", staffVerification ? "no-referrer" : "same-origin");
     response.headers.set("x-content-type-options", "nosniff");
     response.headers.set(
       "content-security-policy",
-      "default-src 'none'; img-src https://onesa.eu/brand/icons/v1/onesa-company-180.png; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      "default-src 'none'; img-src https://onesa.eu/brand/icons/v1/onesa-company-180.png; style-src 'unsafe-inline'; form-action 'self'" +
+      (staffVerification ? " " + new URL(env.issuer).origin : "") + "; frame-ancestors 'none'; base-uri 'none'",
     );
     return response;
   };
