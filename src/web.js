@@ -109,6 +109,8 @@ const page = (title, body, status = 200, wide = false, administration = false) =
       .admin-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
       .admin-actions button[value="active"] { background: #0B725E; border-color: #0B725E; color: white; }
       .admin-actions button[value="active"]:hover { background: #095C4D; border-color: #095C4D; }
+      .admin-actions button[value="deleted"] { color: #8F2934; border-color: #CBA6AB; }
+      .admin-actions button[value="deleted"]:hover { background: #FFF3F4; }
       .admin-access form { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto; }
       .admin-audit { max-height: 30rem; overflow: auto; }
       .admin-audit details { border-bottom: 1px solid #D9E6E1; }
@@ -258,6 +260,7 @@ const intranet = new Map([["portal", "Portal"], ["internal-documents", "Internal
 const intranetName = "Onesa Intranet";
 const adminLabel = value => value === "hr" ? "HR" : value.charAt(0).toUpperCase() + value.slice(1).replaceAll("-", " ");
 const adminEmail = email => "<!--email_off-->" + esc(email) + "<!--/email_off-->";
+const deleteRequestButton = '<button name="status" value="deleted">Delete request</button>';
 const adminProductName = product => {
   if (intranet.has(product)) return intranetName + " · " + intranet.get(product);
   if (product === "identity") return "Onesa Identity";
@@ -1093,7 +1096,8 @@ export function createApp(store, env, client = authClient(env)) {
             post("/admin/change", session.csrf, hidden("kind", "product-administrator-review") +
               hidden("product", scopeProduct) + hidden("id", user.id) + hidden("revision", user.revision) +
               '<div class="admin-actions"><button name="status" value="active">Approve administrator access</button>' +
-              '<button name="status" value="rejected">Decline request</button></div>')) + "</li>").join("");
+              '<button name="status" value="rejected">Decline request</button>' + deleteRequestButton +
+              '</div>')) + "</li>").join("");
         return page(
           productName + " administrators",
           '<div class="identity-admin">' +
@@ -1140,7 +1144,7 @@ export function createApp(store, env, client = authClient(env)) {
           if (session.id === user.id) return row + "</div>";
           const buttons = status === "active" ? '<button name="status" value="revoked">Remove access</button>'
             : '<button name="status" value="active">Approve registration</button>' +
-              (status === "pending" ? '<button name="status" value="rejected">Decline</button>' : "");
+              (status === "pending" ? '<button name="status" value="rejected">Decline</button>' + deleteRequestButton : "");
           return post("/admin/change", session.csrf, base + hidden("kind", "registration") + hidden("tier", tier) +
             row + '<div class="admin-actions">' + buttons + "</div></div>");
         }).join("");
@@ -1149,7 +1153,7 @@ export function createApp(store, env, client = authClient(env)) {
           '<div class="admin-row"><div class="admin-identity"><strong>' + esc(adminProductName(grant.product)) +
           '</strong><span class="muted">' + esc(adminLabel(grant.role)) + ' access request</span></div>' +
           '<div class="admin-actions"><button name="status" value="active">Approve</button>' +
-          '<button name="status" value="rejected">Decline</button></div></div>',
+          '<button name="status" value="rejected">Decline</button>' + deleteRequestButton + "</div></div>",
         )).join("") + administratorRequests.map(([product]) =>
           '<p class="admin-row"><a href="/admin?product=' + esc(product) + '">Review ' +
           esc(adminProductName(product)) + " administrator request</a></p>",
@@ -1182,7 +1186,9 @@ export function createApp(store, env, client = authClient(env)) {
       }
       const history = store.all("SELECT * FROM audit ORDER BY seq DESC LIMIT 100").map(event => {
         const date = new Date(event.at);
-        return '<li><details><summary>' + esc(adminLabel(event.action)) + ' · <time datetime="' +
+        const action = ["shared-registration", "product-administrator-request", "review"].includes(event.action) &&
+          JSON.parse(event.detail).status === "deleted" ? "Request deleted" : adminLabel(event.action);
+        return '<li><details><summary>' + esc(action) + ' · <time datetime="' +
           esc(date.toISOString()) + '">' + esc(auditDate.format(date)) + " UTC</time></summary>" +
           "<p>Actor <code>" + esc(event.actor) + "</code></p><p>Target <code>" + esc(event.target) +
           "</code></p><pre>" + esc(event.detail) + "</pre></details></li>";
