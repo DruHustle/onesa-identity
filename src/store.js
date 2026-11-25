@@ -154,6 +154,15 @@ export function openStore(path, { existingOnly = false } = {}) {
       id TEXT PRIMARY KEY REFERENCES accounts ON DELETE CASCADE,
       ends_at INTEGER NOT NULL, failures INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS pasofi_authenticator_flows(
+      ticket_hash TEXT PRIMARY KEY,
+      id TEXT NOT NULL REFERENCES accounts ON DELETE CASCADE,
+      client TEXT NOT NULL, audience TEXT NOT NULL, expires INTEGER NOT NULL,
+      browser_hash TEXT UNIQUE, state TEXT, csrf TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0, verified_at INTEGER,
+      receipt_hash TEXT UNIQUE
+    );
+    CREATE INDEX IF NOT EXISTS pasofi_authenticator_flow_expiry ON pasofi_authenticator_flows(expires);
     CREATE TABLE IF NOT EXISTS recovery_limit(id TEXT PRIMARY KEY REFERENCES accounts, next INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS verification_email_limit(subject_hash TEXT PRIMARY KEY, next INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS account_deletion_requests(

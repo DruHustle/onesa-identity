@@ -64,7 +64,7 @@ async function verificationDenial(event, policyOrigin, policyKey) {
 }
 
 // POLICY_URL and POLICY_KEY belong in the Action secret store.
-exports.onExecutePostLogin = async (event, api) => {
+async function applyPolicy(event, api, continuing = false) {
   const deny = () =>
     api.access.deny("Onesa access is unavailable for this application.");
   const { POLICY_URL, POLICY_ORIGIN, POLICY_KEY } = event.secrets || {};
@@ -74,7 +74,7 @@ exports.onExecutePostLogin = async (event, api) => {
     !POLICY_KEY
   )
     return deny();
-  let decision;
+  let decision, policyOrigin, resourceAudience;
   let infrastructure = false;
   let portainer = false;
   try {
@@ -101,6 +101,8 @@ exports.onExecutePostLogin = async (event, api) => {
     if (event.user?.email_verified !== true)
       return api.access.deny(await verificationDenial(event, origin.origin, POLICY_KEY));
     const audience = infrastructureAudience(event);
+    policyOrigin = origin.origin;
+    resourceAudience = audience.audience;
     infrastructure = audience.infrastructure;
     portainer = audience.portainer === true;
     const result = await fetch(url, {
@@ -137,7 +139,37 @@ exports.onExecutePostLogin = async (event, api) => {
     .filter(Number.isFinite);
   const latest = observed.length ? Math.max(...observed) : 0;
   const pasoFiRenewal = decision.product === "pasofi" && event.transaction?.protocol === "oauth2-refresh-token";
-  const mfaTime = !pasoFiRenewal && latest > 0 && latest <= Date.now() ? Math.floor(latest / 1000) : 0;
+  let mfaTime = !pasoFiRenewal && latest > 0 && latest <= Date.now() ? Math.floor(latest / 1000) : 0;
+  const now = Math.floor(Date.now() / 1000);
+  const localPasoFiFactor = decision.product === "pasofi" && decision.require_mfa === true &&
+    event.transaction?.protocol === "oidc-basic-profile";
+  if (continuing || (localPasoFiFactor && (!mfaTime || now - mfaTime >= 300))) {
+    if (!localPasoFiFactor || !continuing && !api.redirect?.canRedirect()) return deny();
+    const body = { subject: event.user.user_id, clientId: event.client.client_id, audience: resourceAudience };
+    const phase = continuing ? "finish" : "start";
+    if (continuing) {
+      body.receipt = event.request?.body?.onesa_factor_receipt;
+      body.state = event.request?.query?.state ?? event.request?.body?.state;
+      if (typeof body.receipt !== "string" || typeof body.state !== "string") return deny();
+    }
+    try {
+      const response = await fetch(policyOrigin + "/internal/pasofi-authenticator/" + phase, {
+        method: "POST", redirect: "error", signal: AbortSignal.timeout(3500),
+        headers: { authorization: "Bearer " + POLICY_KEY, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) return deny();
+      const proof = await response.json();
+      if (!continuing) {
+        if (typeof proof.ticket !== "string" || !/^[\w-]{43}$/.test(proof.ticket)) return deny();
+        return api.redirect.sendUserTo(policyOrigin + "/account/pasofi-authenticator", { query: { ticket: proof.ticket } });
+      }
+      if (!Number.isSafeInteger(proof.mfaTime) || proof.mfaTime > now || now - proof.mfaTime >= 300) return deny();
+      mfaTime = proof.mfaTime;
+    } catch {
+      return deny();
+    }
+  }
   if (!pasoFiRenewal && (decision.require_mfa === true || infrastructure) &&
       (!mfaTime || mfaTime > Math.floor(Date.now() / 1000) ||
        Math.floor(Date.now() / 1000) - mfaTime > 300)) return deny();
@@ -181,4 +213,7 @@ exports.onExecutePostLogin = async (event, api) => {
     roles: decision.roles,
   }))
     api.accessToken.setCustomClaim(ns + name, value);
-};
+}
+
+exports.onExecutePostLogin = (event, api) => applyPolicy(event, api);
+exports.onContinuePostLogin = (event, api) => applyPolicy(event, api, true);
