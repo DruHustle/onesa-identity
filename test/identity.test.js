@@ -2177,6 +2177,57 @@ test("Identity administration lists reviewable accounts first and opens a single
   }
 });
 
+test("administrator request deletion removes only pending requests and records the decision", async t => {
+  const { call, login, store, admin } = await fixture(t);
+  const member = store.register(env.issuer, "oidc|request-member", "request-member@onesa.test", "", "user");
+  const staff = store.register(env.issuer, "oidc|product-reviewer", "product-reviewer@onesa.test");
+  store.change(admin.id, staff.id, staff.revision, { kind: "status", status: "active" });
+  store.change(admin.id, staff.id, staff.revision + 1, { kind: "grant", product: "pasofi", role: "administrator", status: "active" });
+  store.requestAccess(member.id, "pasofi");
+  store.requestRegistration(member.id, "admin", "pasofi", "farmer");
+  const revision = () => store.lookup(env.issuer, "oidc|request-member").revision;
+  store.change(admin.id, member.id, revision(), { kind: "grant", product: "factory", role: "user", status: "active" });
+  const central = await login("identity-admin");
+  const scoped = await login("product-reviewer", "/admin?product=pasofi");
+  const detail = who => ({ cookie: who.cookie, origin: env.origin });
+  const csrf = who => store.one("SELECT csrf FROM sessions WHERE hash=?", digest(who.cookie.split("=")[1])).csrf;
+  const remove = (who, fields, inspectedRevision = revision(), origin = env.origin) =>
+    call("/admin/change", "POST", new URLSearchParams({
+      csrf: csrf(who), id: member.id, revision: inspectedRevision, status: "deleted", ...fields,
+    }), { cookie: who.cookie, origin });
+  const registration = { kind: "registration", tier: "user" };
+  const access = { kind: "review", assignment: "pasofi/customer" };
+  const productAdmin = { kind: "product-administrator-review", product: "pasofi" };
+  const accountPage = async () => (await call("/admin?id=" + member.id, "GET", undefined, detail(central))).text();
+  const scopePage = async () => (await call("/admin?product=pasofi", "GET", undefined, detail(scoped))).text();
+  assert.equal((await accountPage()).match(/>Delete request<\/button>/g).length, 2);
+  assert.match(await scopePage(), /request-member@onesa\.test[\s\S]*Delete request/);
+  assert.equal((await remove(scoped, registration)).status, 403);
+  assert.equal((await remove(scoped, { ...productAdmin, product: "farmer" })).status, 403);
+  assert.equal((await remove(central, access, revision(), "https://example.net")).status, 403);
+  const stale = revision();
+  assert.equal((await remove(central, registration)).status, 303);
+  assert.equal(registrations(store.db, member.id).has("user"), false);
+  assert.equal((await remove(central, access, stale)).status, 409);
+  assert.equal((await remove(central, access)).status, 303);
+  assert.equal(store.one("SELECT 1 FROM grants WHERE id=? AND product='pasofi'", member.id), undefined);
+  assert.equal((await remove(scoped, productAdmin)).status, 303);
+  assert.equal(productAdministratorRequests(store.db, member.id).has("pasofi"), false);
+  assert.equal(productAdministratorRequests(store.db, member.id).get("farmer"), "pending");
+  assert.equal((await remove(central, { ...access, assignment: "factory/user" })).status, 409);
+  assert.equal(store.one("SELECT status FROM grants WHERE id=? AND product='factory'", member.id).status, "active");
+  assert.equal(store.lookup(env.issuer, "oidc|request-member").status, "pending");
+  assert.doesNotMatch(await scopePage(), /request-member@onesa\.test/);
+  assert.doesNotMatch(await accountPage(), />Delete request<\/button>/);
+  assert.equal(store.one("SELECT count(*) AS n FROM audit WHERE target=? AND json_extract(detail,'$.status')='deleted'", member.id).n, 3);
+  store.requestRegistration(member.id, "user");
+  store.requestAccess(member.id, "pasofi");
+  store.requestRegistration(member.id, "admin", "pasofi");
+  assert.equal(registrations(store.db, member.id).get("user"), "pending");
+  assert.equal(store.one("SELECT status FROM grants WHERE id=? AND product='pasofi'", member.id).status, "pending");
+  assert.equal(productAdministratorRequests(store.db, member.id).get("pasofi"), "pending");
+});
+
 test("an administrator's status control reflects each persisted account state", async (t) => {
   const { call, login, store } = await fixture(t);
   const user = store.register(env.issuer, "fixture|user", "user@example.test");

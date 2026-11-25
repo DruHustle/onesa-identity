@@ -52,7 +52,8 @@ export function registrations(db, id) {
   const result = new Map();
   for (const row of rows) {
     const { tier, status } = JSON.parse(row.detail);
-    result.set(tier, status);
+    if (status === "deleted") result.delete(tier);
+    else result.set(tier, status);
   }
   return result;
 }
@@ -63,7 +64,8 @@ export function productAdministratorRequests(db, id) {
   const requests = new Map();
   for (const row of rows) {
     const { product, status } = JSON.parse(row.detail);
-    requests.set(product, status);
+    if (status === "deleted") requests.delete(product);
+    else requests.set(product, status);
   }
   return requests;
 }
@@ -562,11 +564,11 @@ export function openStore(path, { existingOnly = false } = {}) {
         check(one("SELECT 1 FROM links WHERE id=? LIMIT 1", id), "A verified Onesa account is required");
         const request = productAdministratorRequests(db, id).get(scopeProduct);
         if (review) {
-          check(request === "pending" && ["active", "rejected"].includes(operation.status),
+          check(request === "pending" && ["active", "rejected", "deleted"].includes(operation.status),
             "The request has changed. Reload before reviewing.");
           check(["active", "pending"].includes(current.status), "Account unavailable");
-          if (operation.status === "rejected") {
-            audit(actor, "product-administrator-request", id, { product: scopeProduct, status: "rejected" });
+          if (operation.status !== "active") {
+            audit(actor, "product-administrator-request", id, { product: scopeProduct, status: operation.status });
             run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
             return;
           }
@@ -646,7 +648,7 @@ export function openStore(path, { existingOnly = false } = {}) {
         const previous = registrations(db, id).get(operation.tier);
         check(previous && (
           (["pending", "revoked", "rejected"].includes(previous) && operation.status === "active") ||
-          (previous === "pending" && operation.status === "rejected") ||
+          (previous === "pending" && ["rejected", "deleted"].includes(operation.status)) ||
           (previous === "active" && operation.status === "revoked")
         ), "Invalid registration decision");
         audit(actor, "shared-registration", id, { tier: operation.tier, status: operation.status });
@@ -655,11 +657,12 @@ export function openStore(path, { existingOnly = false } = {}) {
       } else if (operation.kind === "review") {
         const requested = accountProducts.get(operation.product);
         check(requested && requested.role === operation.role, "Invalid requested role");
-        check(["active", "rejected"].includes(operation.status), "Invalid review decision");
-        const result = run(
-          "UPDATE grants SET status=? WHERE id=? AND product=? AND role=? AND status='pending'",
-          operation.status, id, operation.product, operation.role,
-        );
+        check(["active", "rejected", "deleted"].includes(operation.status), "Invalid review decision");
+        const result = operation.status === "deleted"
+          ? run("DELETE FROM grants WHERE id=? AND product=? AND role=? AND status='pending'",
+              id, operation.product, operation.role)
+          : run("UPDATE grants SET status=? WHERE id=? AND product=? AND role=? AND status='pending'",
+              operation.status, id, operation.product, operation.role);
         check(result.changes === 1, "Request changed; reload before reviewing");
       } else if (operation.kind === "grant") {
         check(
