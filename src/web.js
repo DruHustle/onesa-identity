@@ -149,6 +149,10 @@ const redirect = (url, cookies = []) => {
 const accountSections = new Set(["#product-access", "#administrator-access", "#account-security", "#account-closure"]);
 const retryPath = (destination, origin) => {
   const target = new URL(destination, origin);
+  const factorRoute = target.searchParams.get("_factor");
+  target.searchParams.delete("_factor");
+  if (factorRoute === "/step-up" || factorRoute === "/verify-factor")
+    return factorRoute + "?return=" + encodeURIComponent(target.pathname + target.search + target.hash);
   const invite = target.searchParams.get("invite");
   const tier = target.searchParams.get("enrollment");
   if (tier === "admin" || tier === "user") {
@@ -204,6 +208,12 @@ const productSelect = (label, entries) =>
   Array.from(presentedProducts(entries), ([product, { name }]) => '<option value="' + esc(product) + '">' + esc(name) + "</option>").join("") +
   "</select></label>";
 const mfaClaim = "https://onesa.eu/claims/mfa_time";
+const freshFactor = (factor, now) => Number.isSafeInteger(factor) &&
+  factor > 0 && factor <= now && now - factor <= 300000;
+function factorVerification(title, destination, message, status = 403) {
+  return page(title, '<p>' + esc(message) + '</p><p><a class="primary" href="' +
+    esc(destination) + '">Verify with your authenticator</a></p>', status);
+}
 async function sendVerificationEmail(verification, subject, accountClient) {
   const options = {
     method: "POST",
@@ -516,13 +526,17 @@ export function createApp(store, env, client = authClient(env)) {
         params.max_age = "0";
         params.acr_values =
           "http://schemas.openid.net/pape/policies/2007/06/multi-factor";
+        const target = new URL(destination, env.origin);
+        target.searchParams.set("_factor", p);
+        destination = target.pathname + target.search + target.hash;
       }
       const location = await client.authorize(params);
       // A first signup can wait for the inbox inside the hosted transaction.
       const flowSeconds = p === "/register" ? 900 : 300;
-      const cookies = [cookie("flow", token, flowSeconds)];
+      const cookies = [cookie("flow-" + state, token, flowSeconds)];
       const started = store.atomic(() => {
-        const productEnrollment = new URL(destination, env.origin).searchParams.has("product");
+        const target = new URL(destination, env.origin);
+        const productEnrollment = target.searchParams.has("enrollment") && target.searchParams.has("product");
         const resumes = productEnrollment ? browserResumes(req) : [];
         // Resume the hotspot flow only in the browser holding its registration receipt.
         if (hotspot && p === "/login" &&
@@ -537,7 +551,7 @@ export function createApp(store, env, client = authClient(env)) {
           const browserHash = digest(resume);
           store.run("DELETE FROM registration_resumes WHERE expires<=? OR (hash=? AND destination=?)", now, browserHash, destination);
           store.run("INSERT INTO registration_resumes VALUES(?,?,?,?)", browserHash, state, destination, now + 86400000);
-          cookies.push(cookie("flow-" + state, token, flowSeconds), cookie("registration", resume, 86400));
+          cookies.push(cookie("registration", resume, 86400));
         }
         return true;
       });
@@ -593,6 +607,17 @@ export function createApp(store, env, client = authClient(env)) {
       if (identity.email_verified !== true)
         return verificationPage(flow.destination, env, "required");
       const target = new URL(flow.destination, env.origin);
+      const requiresFactor = target.searchParams.has("_factor");
+      target.searchParams.delete("_factor");
+      const now = Date.now();
+      const factor = identity[mfaClaim] * 1000;
+      const factorVerified = Number.isSafeInteger(identity[mfaClaim]) && freshFactor(factor, now);
+      const startedAt = Math.floor((flow.expires - 300000) / 1000) * 1000;
+      if (requiresFactor && (!factorVerified || factor < startedAt)) return factorVerification(
+        "Second factor not verified",
+        retryPath(flow.destination, env.origin),
+        "Onesa sign-in did not confirm an authenticator check. Try again. If no authenticator prompt appears, contact your Onesa administrator.",
+      );
       const product = target.searchParams.get("product");
       const tier = target.searchParams.get("enrollment");
       const destination = product && tier && returns.get(returnKey(
@@ -612,13 +637,7 @@ export function createApp(store, env, client = authClient(env)) {
       if (["suspended", "rejected"].includes(user.status))
         return page("Account access is disabled", "This Onesa account is currently suspended or its access request was declined. Contact your Onesa administrator if you believe this is a mistake.", 403);
       const session = secret(),
-        csrf = secret(),
-        now = Date.now();
-      const factor =
-        Number.isSafeInteger(identity[mfaClaim]) &&
-        identity[mfaClaim] * 1000 <= now
-          ? identity[mfaClaim] * 1000
-          : 0;
+        csrf = secret();
       store.run("DELETE FROM sessions WHERE expires<=?", now);
       store.run(
         "INSERT INTO sessions VALUES(?,?,?,?,?)",
@@ -626,14 +645,14 @@ export function createApp(store, env, client = authClient(env)) {
         user.id,
         csrf,
         now + 1800000,
-        factor,
+        factorVerified ? factor : 0,
       );
       const cookies = [cookie("session", session, 1800)];
+      if (stateCookie) cookies.push(cookie("flow-" + state, "", 0));
       if (digest(readCookie(req, "flow")) === flow.hash) cookies.push(cookie("flow", "", 0));
       if (destination) {
         const consumed = store.run("DELETE FROM registration_resumes WHERE hash=? AND state=?",
           digest(readCookie(req, "registration")), flow.state);
-        cookies.push(cookie("flow-" + state, "", 0));
         if (consumed.changes && !browserResumes(req).length) cookies.push(cookie("registration", "", 0));
       }
       return redirect(destination || (target.pathname + target.search + target.hash), cookies);
@@ -743,8 +762,7 @@ export function createApp(store, env, client = authClient(env)) {
       if (p === "/account/delete") {
         if (form.getAll("confirm").length !== 1 || form.get("confirm") !== "DELETE")
           return page("Confirmation required", "Enter DELETE exactly to request account closure.", 400);
-        if (!session.mfa_at || Date.now() - session.mfa_at > 300000 ||
-            session.mfa_at > Date.now())
+        if (!freshFactor(session.mfa_at, Date.now()))
           return page("Verify your identity",
             '<p>Recent multi-factor verification is required before closing your account.</p>' +
             '<a href="/verify-factor?return=%2Faccount%23account-closure">Verify a second factor</a>', 403);
@@ -835,13 +853,11 @@ export function createApp(store, env, client = authClient(env)) {
     );
     if (!session || (scopeProduct ? !(globalAdministrator || canManageProduct) : !globalAdministrator))
       return page("Identity administrator required", "", 403);
-    if (!session.mfa_at || Date.now() - session.mfa_at > 300000)
-      return page(
+    if (!freshFactor(session.mfa_at, Date.now()))
+      return factorVerification(
         "Verify your identity",
-        '<a href="/step-up?return=' + encodeURIComponent(scopeProduct
-          ? "/admin?product=" + scopeProduct
-          : "/admin") + '">Continue with fresh MFA</a>',
-        403,
+        "/step-up?return=" + encodeURIComponent(scopeProduct ? "/admin?product=" + scopeProduct : "/admin"),
+        "To open administration, sign in again and complete the authenticator prompt. If this is your first verification, follow the setup instructions.",
       );
     if (p === "/admin" && method === "GET") {
       if (scopeProduct) {
