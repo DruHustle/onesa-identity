@@ -71,8 +71,14 @@ const page = (title, body, status = 200, wide = false, administration = false) =
       .intranet-areas { display: grid; gap: .5rem; }
       .intranet-area { display: grid; gap: .35rem; padding: .55rem 0 0; border-top: 1px solid #D9E6E1; }
       .account-footer { margin-top: 16px; }
-      .authenticator-qr { display: block; max-width: min(100%, 260px); height: auto; margin: 0 0 1rem; image-rendering: pixelated; }
-      .authenticator-manual { margin-bottom: 1rem; }
+      .authenticator-setup { margin-bottom: 1.5rem; }
+      .authenticator-qr { display: block; max-width: min(100%, 260px); height: auto; margin: 0 0 .5rem; image-rendering: pixelated; }
+      .authenticator-manual summary { width: fit-content; min-height: 44px; padding: .6rem 0; cursor: pointer; color: #087F68; }
+      .authenticator-manual p { margin-bottom: .5rem; }
+      .authenticator-verification form { display: grid; gap: .75rem; max-width: 20rem; }
+      .authenticator-verification label { margin: 0; gap: .375rem; font-weight: 600; }
+      .authenticator-verification input { width: 100%; font-variant-numeric: tabular-nums; }
+      .authenticator-verification button { width: 100%; justify-content: center; font-weight: 700; }
       @media (max-width: 700px) { .account-grid { grid-template-columns: 1fr; } }
       label { display: inline-grid; max-width: 100%; margin: .3rem; gap: .2rem; }
       a { color: #087F68; text-underline-offset: 3px; }
@@ -453,6 +459,7 @@ export function createApp(store, env, client = authClient(env)) {
             '<form method="post" action="' + esc(next.href) + '">' +
             hidden("state", outcome.state) + hidden("onesa_factor_receipt", outcome.receipt) +
             '<button class="primary">Continue to PasoFi Staff</button></form>');
+          response.headers.set("referrer-policy", "no-referrer");
           response.headers.append("set-cookie", cookie("pasofi-authenticator", "", 0));
           return response;
         }
@@ -786,17 +793,18 @@ export function createApp(store, env, client = authClient(env)) {
         const qr = qrcode(0, "M");
         qr.addData("otpauth://totp/Onesa:" + account + "?secret=" + view.setupKey + "&issuer=Onesa");
         qr.make();
-        setup = '<p>Open your authenticator app, add an account, and scan this QR code. Then enter the six-digit code it shows.</p>' +
+        setup = '<div class="authenticator-setup">' +
+          '<p>Open your authenticator app, add an account, and scan this QR code. Then enter the six-digit code it shows.</p>' +
           '<img class="authenticator-qr" src="' + qr.createDataURL(5) + '" alt="Onesa authenticator setup QR code">' +
           '<details class="authenticator-manual"><summary>Enter a setup key instead</summary>' +
           '<p>Add a time-based account called Onesa using this key.</p>' +
-          '<p><code aria-label="Authenticator setup key">' + esc(view.setupKey) + '</code></p></details>';
+          '<p><code aria-label="Authenticator setup key">' + esc(view.setupKey) + '</code></p></details></div>';
       }
       return page(view.setupKey ? "Set up your authenticator" : "Enter your authenticator code",
         '<p>Verifying <strong>' + esc(session.email) + '</strong></p>' + setup + feedback +
-        post("/account/authenticator", session.csrf,
-          '<label>Six-digit code<input name="code" required inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6"></label> ' +
-          '<button class="primary">Verify and continue</button>'), feedback ? 400 : 200);
+        '<div class="authenticator-verification">' + post("/account/authenticator", session.csrf,
+          '<label>Six-digit code<input name="code" required inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6"></label>' +
+          '<button class="primary">Verify and continue</button>') + '</div>', feedback ? 400 : 200);
     }
     if (p === "/account/closure" && method === "GET") {
       const destination = "/account#account-closure";
@@ -1222,10 +1230,13 @@ export function createApp(store, env, client = authClient(env)) {
       }
     }
     response.headers.set("cache-control", "no-store");
-    const pathname = new URL(req.url).pathname;
-    const staffVerification = pathname === pasoFiFactorPath;
-    const accountVerification = pathname === "/account/authenticator";
-    response.headers.set("referrer-policy", staffVerification || accountVerification ? "no-referrer" : "same-origin");
+    const requestUrl = new URL(req.url);
+    const staffVerification = requestUrl.pathname === pasoFiFactorPath;
+    const accountVerification = requestUrl.pathname === "/account/authenticator";
+    if (!response.headers.has("referrer-policy")) {
+      const staffEntry = staffVerification && requestUrl.searchParams.has("ticket");
+      response.headers.set("referrer-policy", staffEntry ? "no-referrer" : "same-origin");
+    }
     response.headers.set("x-content-type-options", "nosniff");
     response.headers.set(
       "content-security-policy",
