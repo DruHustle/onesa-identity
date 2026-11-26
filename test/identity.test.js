@@ -815,7 +815,7 @@ test("a pending verified account can request a single product's administrator ac
   const memberHeaders = { cookie: member.cookie, origin: env.origin };
   const account = () => call("/account", "GET", undefined, memberHeaders);
   const html = await (await account()).text();
-  assert.match(html, /Request administrator access<\/button>/);
+  assert.doesNotMatch(html, /Request administrator access<\/button>/);
   const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
   const request = (product, headers = memberHeaders, token = csrf) => call("/account/enrollment", "POST",
     new URLSearchParams({ product, tier: "admin", csrf: token }), headers);
@@ -824,7 +824,7 @@ test("a pending verified account can request a single product's administrator ac
   assert.match(await expired.text(), /Sign in to continue/);
   const stale = await request("farmer", memberHeaders, "invalid");
   assert.equal(stale.status, 403);
-  assert.match(await stale.text(), /Reload your Onesa account/);
+  assert.match(await stale.text(), /Reload your account/);
   assert.equal((await request("farmer", { ...memberHeaders, origin: "https://outside.test" })).status, 403);
   assert.equal((await request("identity")).status, 400);
   assert.deepEqual([...productAdministratorRequests(store.db, actor.id)], []);
@@ -878,6 +878,59 @@ test("a pending verified account can request a single product's administrator ac
   assert.match(await (await account()).text(), /Administrator approved/);
 });
 
+test("protected entry offers normal signup and queues staff access only on an explicit verified request", async t => {
+  const audience = "https://api.pasofi.mobile.onesa.eu";
+  const { store, call, login, setRedeem } = await fixture(t, {
+    resources: new Map([[audience, { product: "pasofi", clients: ["pasofi-web"] }]]),
+  });
+  const path = "/access?product=pasofi&role=agent";
+  const subject = "auth0|k0-test-applicant";
+  const applicant = () => store.lookup(env.issuer, subject);
+  const decide = () => call("/internal/decision", "POST", JSON.stringify({
+    subject, audience, client: "pasofi-web",
+  }), { authorization: "Bearer " + env.policyKey });
+  assert.equal((await call("/access?product=pasofi&role=platform")).status, 404);
+  assert.match(await (await call(path)).text(), /Sign up/);
+  const returnPath = "/register?return=" + encodeURIComponent(path);
+  setRedeem(async () => ({ iss: env.issuer, sub: subject, email: "agent@example.test", email_verified: true }));
+  const started = await call(returnPath);
+  const params = new URL(started.headers.get("location")).searchParams;
+  assert.equal(params.get("screen_hint"), "signup");
+  const response = await call("/callback?code=fixture&state=" + params.get("state"), "GET", undefined,
+    { cookie: started.headers.getSetCookie()[0].split(";")[0] });
+  assert.equal(response.headers.get("location"), path);
+  assert.equal(applicant().status, "active");
+  assert.equal(store.staffRequest(applicant().id), undefined);
+  assert.deepEqual([...productAdministratorRequests(store.db, applicant().id)], []);
+  const headers = { origin: env.origin, cookie: response.headers.getSetCookie()[0].split(";")[0] };
+  const form = await (await call(path, "GET", undefined, headers)).text();
+  const csrf = form.match(/name="csrf" value="([^"]+)"/)[1];
+  assert.equal((await call(path, "POST", new URLSearchParams({ csrf }), { ...headers, origin: "https://outside.test" })).status, 403);
+  assert.equal((await call(path, "POST", new URLSearchParams({ csrf }), headers)).status, 303);
+  const revision = applicant().revision;
+  assert.equal((await call(path, "POST", new URLSearchParams({ csrf }), headers)).status, 303);
+  assert.equal(applicant().revision, revision);
+  assert.equal(store.staffRequest(applicant().id), "pending");
+  assert.equal((await decide()).status, 403);
+  setRedeem();
+  const reviewer = await login("identity-admin");
+  const viewer = { origin: env.origin, cookie: reviewer.cookie };
+  const panel = await (await call("/admin?product=pasofi", "GET", undefined, viewer)).text();
+  assert.match(panel, /Approve staff access/);
+  const reviewerCsrf = panel.match(/name="csrf" value="([^"]+)"/)[1];
+  const review = (status, browser = viewer, token = reviewerCsrf) => call("/admin/change", "POST",
+    new URLSearchParams({ kind: "product-staff-review", product: "pasofi", id: applicant().id,
+      revision: String(applicant().revision), status, csrf: token }), browser);
+  assert.equal((await review("active", headers, csrf)).status, 403);
+  assert.equal((await review("active")).status, 303);
+  assert.equal(store.staffRequest(applicant().id), "active");
+  assert.equal((await (await decide()).json()).require_mfa, true);
+  store.register(env.issuer, subject, "agent@example.test", "", "user", "pasofi");
+  assert.deepEqual((await (await decide()).json()).roles, ["customer", "agent"]);
+  assert.equal((await review("revoked")).status, 303);
+  assert.deepEqual((await (await decide()).json()).roles, ["customer"]);
+});
+
 test("one verified signup and independent review give product-scoped user or admin access", async t => {
   const resources = new Map([...accountProducts.keys()].map(product =>
     ["https://" + product + ".test", { product, clients: [product], ...(["factory", "farmer", "logistics"].includes(product) ? { sharedAdminRole: "admin" } : {}) }]));
@@ -895,7 +948,7 @@ test("one verified signup and independent review give product-scoped user or adm
         cookie: started.headers.getSetCookie()[0].split(";")[0],
       });
     };
-    const signup = tier === "user" ? "/register" : "/register?audience=admin";
+    const signup = "/register?audience=" + tier;
     const unverified = await apply(false, signup);
     assert.equal(unverified.status, 403);
     const retry = (await unverified.text()).match(/href="(\/login\?audience=[^"]+)"/)[1].replaceAll("&amp;", "&");
@@ -1060,7 +1113,7 @@ test("Onesa Intranet groups its entry points and requests both scopes without gr
   const headers = { cookie: member.cookie, origin: env.origin };
   const dashboard = async () => (await call("/account", "GET", undefined, headers)).text();
   const initial = await dashboard();
-  assert.equal((initial.match(/<option value="intranet">Onesa Intranet<\/option>/g) ?? []).length, 2);
+  assert.equal((initial.match(/<option value="intranet">Onesa Intranet<\/option>/g) ?? []).length, 1);
   assert.doesNotMatch(initial, /<option value="(?:portal|internal-documents)">/);
   const csrf = initial.match(/name="csrf" value="([^"]+)"/)[1];
   const request = (path, form = {}) => call(path, "POST", new URLSearchParams({ product: "intranet", csrf, ...form }), headers);
