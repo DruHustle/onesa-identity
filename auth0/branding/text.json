@@ -3,12 +3,30 @@
     "login": {
       "title": "Sign in",
       "description": "Enter your email and password.",
-      "signupActionLinkText": "Create account"
+      "signupActionLinkText": "Sign up"
     },
     "signup": {
-      "title": "Create account",
+      "title": "Sign up",
       "description": "Enter your email and choose a password.",
       "loginActionLinkText": "Sign in"
+    },
+    "login-id": {
+      "title": "Sign in",
+      "description": "Enter your email to continue.",
+      "signupActionLinkText": "Sign up"
+    },
+    "login-password": {
+      "title": "Sign in",
+      "description": "Enter your password to continue."
+    },
+    "signup-id": {
+      "title": "Sign up",
+      "description": "Enter your email to get started.",
+      "loginActionLinkText": "Sign in"
+    },
+    "signup-password": {
+      "title": "Choose a password",
+      "description": "Choose a password to finish signing up."
     }
   },
   "de": {
@@ -21,6 +39,24 @@
       "title": "Konto erstellen",
       "description": "Gib deine E-Mail-Adresse ein und wähle ein Passwort.",
       "loginActionLinkText": "Anmelden"
+    },
+    "login-id": {
+      "title": "Anmelden",
+      "description": "Gib deine E-Mail-Adresse ein.",
+      "signupActionLinkText": "Konto erstellen"
+    },
+    "login-password": {
+      "title": "Anmelden",
+      "description": "Gib dein Passwort ein."
+    },
+    "signup-id": {
+      "title": "Konto erstellen",
+      "description": "Gib deine E-Mail-Adresse ein.",
+      "loginActionLinkText": "Anmelden"
+    },
+    "signup-password": {
+      "title": "Passwort wählen",
+      "description": "Wähle ein Passwort für dein Konto."
     }
   }
 }
