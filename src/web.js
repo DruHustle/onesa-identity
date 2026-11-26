@@ -893,20 +893,10 @@ export function createApp(store, env, client = authClient(env)) {
         }
         const invite = url.searchParams.get("invite");
         const suffix = invite && /^[\w-]{43}$/.test(invite) ? "?invite=" + encodeURIComponent(invite) : "";
-        const featureSignIn = (section) => suffix ? "/login" + suffix : "/login?return=" + encodeURIComponent("/account" + section);
         return page(
-          "Sign in to Onesa",
-          '<p class="muted">Use one Onesa account across your approved products. Create an account, verify your email, and request access to the products you need.</p>' +
-          '<div class="actions"><a class="primary" href="/login' + suffix + '">Sign in to Onesa</a>' +
-          '<a href="/register' + suffix + '">Create an Onesa account</a>' +
-          '<a href="' + featureSignIn("#administrator-access") + '">Request administrator access</a></div>' +
-          '<section aria-labelledby="access-overview"><h2 id="access-overview">Product access</h2>' +
-          '<p>See your product access, request another product, or check the status of an administrator request.</p>' +
-          '<p>' + Array.from(presentedProducts(accountProducts).values(), ({ name }) => esc(name)).join(" · ") + '</p>' +
-          '<a href="' + featureSignIn("#product-access") + '">Sign in to manage product access</a></section>' +
-          '<section aria-labelledby="security-overview"><h2 id="security-overview">Account security</h2>' +
-          '<p>Set up or verify a second sign-in factor and find password recovery options.</p>' +
-          '<a href="' + featureSignIn("#account-security") + '">Sign in to manage account security</a></section>',
+          "Sign in",
+          '<div class="actions"><a class="primary" href="/login' + suffix + '">Sign in</a>' +
+          '<a href="/register' + suffix + '">Create account</a></div>',
         );
       }
       if (p !== "/admin") {

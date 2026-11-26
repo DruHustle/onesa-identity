@@ -280,9 +280,9 @@ test("the Onesa Account entry preserves invitations for sign-in and registration
   const invitation = store.invite("identity-admin", "invitee@onesa.test");
   const account = await call("/account?invite=" + invitation);
   const html = await account.text();
-  assert.match(html, /<h1>Sign in to Onesa<\/h1>/);
+  assert.match(html, /<h1>Sign in<\/h1>/);
   assert.ok(html.includes('href="/login?invite=' + invitation + '"'));
-  assert.ok(html.includes('href="/register?invite=' + invitation + '">Create an Onesa account'));
+  assert.ok(html.includes('href="/register?invite=' + invitation + '">Create account'));
   assert.doesNotMatch(html, /type="password"/);
   for (const [path, hint] of [["/login", null], ["/register", "signup"]]) {
     const start = await call(path + "?invite=" + invitation);
@@ -295,7 +295,7 @@ test("the Onesa Account entry preserves invitations for sign-in and registration
   }
 });
 
-test("the public Account overview returns a signed-in visitor to the selected feature", async (t) => {
+test("the signed-out Account page is focused and existing feature returns still work", async (t) => {
   const { call, login } = await fixture(t);
   for (const path of ["/", "/account"]) {
     const overview = await call(path);
@@ -303,11 +303,13 @@ test("the public Account overview returns a signed-in visitor to the selected fe
     assert.equal(overview.status, 200);
     assert.equal(overview.headers.get("cache-control"), "no-store");
     assert.equal(overview.headers.has("set-cookie"), false);
-    assert.match(html, /Onesa Intranet.*Smart Farmer.*PasoFi/);
+    assert.match(html, /<h1>Sign in<\/h1>/);
+    assert.match(html, /href="\/login">Sign in<\/a>/);
+    assert.match(html, /href="\/register">Create account<\/a>/);
+    assert.doesNotMatch(html, /Product access|Account security|Request administrator access|Smart Farmer/);
     assert.doesNotMatch(html, /<form|identity-admin@onesa\.test/);
     for (const section of ["product-access", "account-security"]) {
       const returnPath = "/account#" + section;
-      assert.ok(html.includes('href="/login?return=' + encodeURIComponent(returnPath) + '"'));
       const member = await login("overview-member", returnPath);
       assert.equal(member.url, returnPath);
       const account = await call("/account", "GET", undefined, { cookie: member.cookie });
@@ -2178,7 +2180,7 @@ test("Account revokes the local session before the optional Auth0 sign-out hando
       assert.equal(logout.headers.get("location"), "/account");
     }
     const replay = await (await call("/account", "GET", undefined, headers)).text();
-    assert.match(replay, /<h1>Sign in to Onesa<\/h1>/);
+    assert.match(replay, /<h1>Sign in<\/h1>/);
   }
 });
 
