@@ -29,3 +29,21 @@ behind an opaque secure cookie. Native clients use platform-protected
 credentials or an opaque session with server-side token storage. Sign-out
 clears the local session, revokes the refresh token and ends the provider
 session at an allowlisted return URL.
+
+## Platform administrators
+
+Platform grants are assigned in the existing Identity administration console.
+A second platform administrator with a fresh factor must perform changes.
+Existing Identity administrators keep their current console permissions.
+Each API audience must opt in with `platformAdmin: true` after its role and
+MFA checks are qualified. The access token carries the audience's administrator
+role and a signed `platform_administrator` claim. A platform administrator
+transaction needs MFA before it can mint this claim.
+
+To establish or recover platform access when no active platform administrator
+remains, use `migration/platform-admin.js` from the protected Identity host.
+Supply two distinct active Identity administrators with verified links to the
+configured issuer and an independently approved owner receipt. Confirm the
+store backup and both administrators' MFA first. Then verify both can sign in.
+The command records each grant in the audit journal and clears old Identity
+sessions. Normal assignment and revocation use the console.

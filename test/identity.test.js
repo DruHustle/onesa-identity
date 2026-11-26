@@ -21,6 +21,7 @@ import action from "../auth0/post-login.cjs";
 import signupAction from "../auth0/pre-registration.cjs";
 import { applyProofs } from "../migration/link-proof.js";
 import { bootstrapIdentityAdmin } from "../migration/identity-admin.js";
+import { bootstrapPlatformAdministrators } from "../migration/platform-admin.js";
 test("audit chain upgrades legacy rows, blocks mutation and detects tampering", () => {
   const directory = mkdtempSync(join(tmpdir(), "onesa-audit-"));
   const file = join(directory, "identity.sqlite");
@@ -407,6 +408,53 @@ test("shared clients enroll from an exact verified product callback and check gr
   assert.equal((await issue({ user: { user_id: formerSubject, email: formerEmail, email_verified: true } })).denied.length, 1);
   assert.equal(store.activeGrant(former.id, "pasofi"), undefined);
 });
+test("platform administrators are appointed independently with a fresh factor and can lose all-product authority", async (t) => {
+  const audience = "https://farmer-api.example.test";
+  const resources = new Map([[audience, {product:"farmer", clients:["shared-web"], platformAdmin:true}]]);
+  const { store, call, login, admin } = await fixture(t, {resources});
+  function active(name, administrator = false) {
+    const user = store.register(env.issuer, "oidc|" + name, name + "@example.test");
+    store.change(admin.id, user.id, user.revision, {kind:"status", status:"active"});
+    if (administrator) store.change(admin.id, user.id, user.revision + 1,
+      {kind:"grant", product:"identity", role:"administrator", status:"active"});
+    return user.id;
+  }
+  const second = active("platform-second", true);
+  const priorIdentityAdmin = active("identity-only", true);
+  const candidate = active("platform-candidate");
+  assert.throws(() => bootstrapPlatformAdministrators(store, env.issuer, [admin.id,candidate], "fixture"),
+    /Both initial administrators/);
+  assert.equal(store.activeGrant(admin.id, "platform"), undefined);
+  bootstrapPlatformAdministrators(store, env.issuer, [admin.id,second], "fixture");
+  assert.throws(() => bootstrapPlatformAdministrators(store, env.issuer, [admin.id,second], "fixture"),
+    /already exists/);
+
+  async function change(session, id, status) {
+    const html = await (await call("/admin", "GET", undefined, {cookie:session.cookie})).text();
+    const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1] ?? "unavailable";
+    return call("/admin/change","POST",new URLSearchParams({
+      csrf,id,status,kind:"platform-administrator",
+      revision:store.one("SELECT revision FROM accounts WHERE id=?",id).revision,
+    }),{cookie:session.cookie,origin:env.origin});
+  }
+  const legacy = await login("identity-only");
+  assert.equal((await change(legacy,candidate,"active")).status,409);
+  const expired = await login("platform-second","/admin",Date.now()-600000);
+  assert.notEqual((await change(expired,candidate,"active")).status,303);
+  const platform = await login("platform-second");
+  assert.equal((await change(platform,second,"revoked")).status,409);
+  assert.equal((await change(platform,candidate,"active")).status,303);
+  const decision = () => call("/internal/decision","POST",JSON.stringify({
+    subject:"oidc|platform-candidate", audience,client:"shared-web",
+  }),{authorization:"Bearer "+env.policyKey});
+  assert.deepEqual(await (await decision()).json(), {
+    user_id:candidate,product:"farmer",roles:["administrator"],platform_administrator:true,require_mfa:true,
+  });
+  assert.equal((await change(platform,candidate,"revoked")).status,303);
+  assert.equal((await decision()).status,403);
+  assert.equal(store.all("SELECT seq FROM audit WHERE target=? AND action='grant'",candidate).length,2);
+});
+
 test("the Onesa Account entry preserves invitations for sign-in and registration", async (t) => {
   const { call, store } = await fixture(t);
   const invitation = store.invite("identity-admin", "invitee@onesa.test");

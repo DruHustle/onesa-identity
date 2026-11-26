@@ -165,13 +165,16 @@ async function applyPolicy(event, api, continuing = false) {
     .map((m) => Date.parse(m.timestamp))
     .filter(Number.isFinite);
   const latest = observed.length ? Math.max(...observed) : 0;
-  const pasoFiRenewal = decision.product === "pasofi" && event.transaction?.protocol === "oauth2-refresh-token";
+  const pasoFiRenewal = decision.product === "pasofi" && decision.platform_administrator !== true &&
+    event.transaction?.protocol === "oauth2-refresh-token";
   let mfaTime = !pasoFiRenewal && latest > 0 && latest <= Date.now() ? Math.floor(latest / 1000) : 0;
   const now = Math.floor(Date.now() / 1000);
-  const localPasoFiFactor = decision.product === "pasofi" && decision.require_mfa === true &&
+  const localProductFactor = (decision.product === "pasofi" || decision.platform_administrator === true) &&
+    decision.require_mfa === true &&
     event.transaction?.protocol === "oidc-basic-profile";
-  if (continuing || (localPasoFiFactor && (!mfaTime || now - mfaTime >= 300))) {
-    if (!localPasoFiFactor || !continuing && !api.redirect?.canRedirect()) return deny();
+  if (continuing || (localProductFactor &&
+      (decision.platform_administrator === true || !mfaTime || now - mfaTime >= 300))) {
+    if (!localProductFactor || !continuing && !api.redirect?.canRedirect()) return deny();
     const body = { subject: event.user.user_id, clientId: event.client.client_id, audience: resourceAudience };
     const phase = continuing ? "finish" : "start";
     if (continuing) {
@@ -231,6 +234,9 @@ async function applyPolicy(event, api, continuing = false) {
     api.idToken.setCustomClaim(ns + "infrastructure_admin", "approved");
   }
   if (mfaTime) api.accessToken.setCustomClaim(ns + "mfa_time", mfaTime);
+  if (decision.platform_administrator === true && decision.require_mfa === true && mfaTime &&
+      decision.roles.length === 1 && decision.roles[0] === "administrator")
+    api.accessToken.setCustomClaim(ns + "platform_administrator", true);
   if (decision.portal_staff_registration === true && decision.product === "portal" &&
       decision.require_mfa === true && decision.roles.length === 1 && decision.roles[0] === "administrator")
     api.accessToken.setCustomClaim(ns + "portal_staff_registration", true);

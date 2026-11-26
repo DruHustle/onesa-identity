@@ -43,6 +43,7 @@ export const accountProducts = new Map([
 // Staff tools and Identity governance require their own explicit grants.
 export const sharedProducts = new Set(["factory", "logistics", "farmer", "ai", "drone", "robot", "mobile", "pasofi"]);
 export const configurableAdminRoles = new Set(["factory", "logistics", "farmer"]);
+export const platformGrant = "platform";
 
 // The immutable account journal is already backed up and replayed with each stable identity.
 // A later decision replaces that tier's earlier state. A declined or removed request cannot
@@ -572,6 +573,25 @@ export function openStore(path, { existingOnly = false } = {}) {
         current && current.revision === revision,
         "Account changed; reload before editing",
       );
+      if (operation.kind === "platform-administrator" ||
+          (operation.kind === "status" && operation.status !== "active" && activeGrant(id, platformGrant))) {
+        check(!scopeProduct && actor !== id && activeGrant(actor, platformGrant)?.role === "administrator",
+          "Independent platform administrator required");
+        if (operation.kind === "platform-administrator") {
+          check(current.status === "active" &&
+            one("SELECT 1 FROM links WHERE id=? LIMIT 1", id) &&
+            ["active", "revoked"].includes(operation.status), "An active verified account and valid role state are required");
+          const previous = activeGrant(id, platformGrant);
+          check(operation.status === "active" ? !previous : previous?.role === "administrator",
+            "Platform administrator access changed; reload before editing");
+          run("INSERT INTO grants VALUES(?,?,'administrator',?) ON CONFLICT(id,product) DO UPDATE SET status=excluded.status",
+            id, platformGrant, operation.status);
+          run("DELETE FROM sessions WHERE id=?", id);
+          run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
+          audit(actor, "grant", id, { kind: "grant", product: platformGrant, role: "administrator", status: operation.status });
+          return;
+        }
+      }
       if (scopeProduct) {
         const review = operation.kind === "product-administrator-review";
         check(Object.hasOwn(products, scopeProduct), "Product unavailable");
@@ -663,7 +683,8 @@ export function openStore(path, { existingOnly = false } = {}) {
         if (operation.status !== "active")
           run("DELETE FROM sessions WHERE id=?", id);
       } else if (operation.kind === "registration") {
-        check(actor !== id && activeGrant(actor, "identity")?.role === "administrator", "Independent Identity administrator required");
+        check(actor !== id && (activeGrant(actor, "identity")?.role === "administrator" ||
+          activeGrant(actor, platformGrant)?.role === "administrator"), "Independent Identity administrator required");
         const previous = registrations(db, id).get(operation.tier);
         check(previous && (
           (["pending", "revoked", "rejected"].includes(previous) && operation.status === "active") ||

@@ -93,6 +93,8 @@ export function configuration(env) {
       Array.isArray(resource) ||
       !Object.hasOwn(products, resource.product) ||
       resource.product === "identity" ||
+      (resource.platformAdmin !== undefined &&
+        (typeof resource.platformAdmin !== "boolean" || !products[resource.product].includes("administrator"))) ||
       (resource.sharedAdminRole !== undefined &&
         (!configurableAdminRoles.has(resource.product) ||
           !["admin", "administrator"].includes(resource.sharedAdminRole))) ||

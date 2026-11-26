@@ -5,7 +5,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { accountAuthenticator } from "./authenticator.js";
 import {
   secret, digest, Rejected, products, accountProducts, registrations,
-  productAdministratorRequests, sharedRole, configurableAdminRoles,
+  productAdministratorRequests, sharedRole, configurableAdminRoles, platformGrant,
 } from "./store.js";
 
 const esc = (value) =>
@@ -495,7 +495,9 @@ export function createApp(store, env, client = authClient(env)) {
       const { subject, clientId, audience, receipt, state, continuation, allowEnrollment } = await req.json();
       const resource = env.resources.get(audience);
       const actor = typeof subject === "string" && subject.length <= 512 && store.lookup(env.issuer, subject);
-      if (!actor || actor.status !== "active" || resource?.product !== "pasofi" || !resource.clients.includes(clientId))
+      if (!actor || actor.status !== "active" || !resource?.clients.includes(clientId) ||
+          (resource.product !== "pasofi" &&
+            !(resource.platformAdmin === true && store.activeGrant(actor.id, platformGrant)?.role === "administrator")))
         return new Response(null, { status: 403 });
       const now = Date.now();
       if (p.endsWith("/start"))
@@ -522,7 +524,11 @@ export function createApp(store, env, client = authClient(env)) {
       const browser = readCookie(req, "pasofi-authenticator");
       const flow = authenticator.showPasoFi(browser, now);
       if (!flow) return page("Staff sign-in expired", '<a href="https://pasofi.mobile.onesa.eu/#staff">Return to PasoFi Staff</a>', 400);
+      const isPasoFi = env.resources.get(flow.audience)?.product === "pasofi";
+      const productName = isPasoFi ? "PasoFi" : "your app";
       if (!flow.enrolled && !flow.setupKey) {
+        if (!isPasoFi) return page("Start a fresh sign-in",
+          "<p>Return to the app where you started and sign in again to set up your authenticator.</p>", 403);
         if (flow.continuation === "state") return page("Start a fresh PasoFi sign-in",
           '<p>Confirm your Onesa sign-in from PasoFi before adding an authenticator.</p><a class="primary" href="https://pasofi.mobile.onesa.eu/#staff">Return to PasoFi Staff</a>', 403);
         return page("Set up your authenticator first",
@@ -532,7 +538,9 @@ export function createApp(store, env, client = authClient(env)) {
       if (method === "POST") {
         const input = new URLSearchParams(await req.text());
         if (req.headers.get("origin") !== env.origin || !compare(input.get("csrf"), flow.csrf))
-          return page("Verification request expired", '<a href="https://pasofi.mobile.onesa.eu/#staff">Return to PasoFi Staff</a>', 403);
+          return page("Verification request expired", isPasoFi
+            ? '<a href="https://pasofi.mobile.onesa.eu/#staff">Return to PasoFi Staff</a>'
+            : "<p>Return to the app where you started and sign in again.</p>", 403);
         const outcome = authenticator.verifyPasoFi(browser, input.get("code") ?? "", now);
         if (outcome.status === "verified") {
           const next = new URL("/continue", env.issuer);
@@ -540,9 +548,9 @@ export function createApp(store, env, client = authClient(env)) {
           if (!outcome.receipt) {
             // Chromium applies the verification form's CSP to its HTTP
             // redirects. A new document starts the provider return as a GET.
-            const response = page("Returning to PasoFi",
+            const response = page("Returning to " + productName,
               '<p>Your authenticator was verified.</p>' +
-              '<a class="primary" rel="noreferrer" href="' + esc(next.href) + '">Continue to PasoFi</a>',
+              '<a class="primary" rel="noreferrer" href="' + esc(next.href) + '">Continue to ' + productName + '</a>',
               200, false, false, next.href);
             response.headers.set("referrer-policy", "no-referrer");
             response.headers.append("set-cookie", cookie("pasofi-authenticator", "", 0));
@@ -551,7 +559,7 @@ export function createApp(store, env, client = authClient(env)) {
           const response = page("Authenticator verified",
             '<form method="post" action="' + esc(next.href) + '">' +
             hidden("onesa_factor_receipt", outcome.receipt) +
-            '<button class="primary">Continue to PasoFi Staff</button></form>');
+            '<button class="primary">Continue to ' + (isPasoFi ? "PasoFi Staff" : "your app") + '</button></form>');
           response.headers.set("referrer-policy", "no-referrer");
           response.headers.append("set-cookie", cookie("pasofi-authenticator", "", 0));
           return response;
@@ -560,7 +568,8 @@ export function createApp(store, env, client = authClient(env)) {
           '<p>Too many codes were entered. Start a fresh staff sign-in after ten minutes.</p>', 429);
         feedback = '<p role="alert">That code could not be verified. Check the current code in your authenticator app.</p>';
       }
-      return page(flow.setupKey ? "Set up your PasoFi authenticator" : "Verify PasoFi staff sign-in",
+      return page(flow.setupKey ? (isPasoFi ? "Set up your PasoFi authenticator" : "Set up your authenticator")
+        : (isPasoFi ? "Verify PasoFi staff sign-in" : "Verify administrator sign-in"),
         '<p>Verifying <strong><!--email_off-->' + esc(flow.email) + '<!--/email_off--></strong></p>' +
         authenticatorSetup(flow.email, flow.setupKey) + feedback + '<div class="authenticator-verification">' +
         post(pasoFiFactorPath, flow.csrf,
@@ -592,6 +601,11 @@ export function createApp(store, env, client = authClient(env)) {
       if (!resource || !resource.clients.includes(clientId))
         return new Response(null, { status: 403 });
       let product = resource.product;
+      const platformAdministrator = resource.platformAdmin === true &&
+        store.activeGrant(actor?.id ?? "", platformGrant)?.role === "administrator";
+      if (platformAdministrator) return Response.json({
+        user_id: actor.id, product, roles: ["administrator"], platform_administrator: true, require_mfa: true,
+      });
       if (enrollment?.verified === true && enrollment.protocol === "oidc-basic-profile" &&
           enrollmentCallback(resource, clientId, enrollment.redirectUri) &&
           (!actor || !store.one("SELECT 1 FROM grants WHERE id=? AND product=?", actor.id, product))) {
@@ -1092,7 +1106,8 @@ export function createApp(store, env, client = authClient(env)) {
     const scopedGrant = session && scopeProduct
       ? store.activeGrant(session.id, scopeProduct)
       : null;
-    const globalAdministrator = identityGrant?.role === "administrator";
+    const platformAdministrator = session && store.activeGrant(session.id, platformGrant)?.role === "administrator";
+    const globalAdministrator = identityGrant?.role === "administrator" || platformAdministrator;
     const canManageProduct = Boolean(
       scopedGrant && ["administrator", "owner"].includes(scopedGrant.role) ||
       session && scopeProduct && store.activeProductAdministrator(session.id, scopeProduct),
@@ -1203,7 +1218,8 @@ export function createApp(store, env, client = authClient(env)) {
           esc(adminProductName(product)) + " administrator request</a></p>",
         ).join("");
         const grantRows = grants.map(grant =>
-          '<li class="admin-row"><div class="admin-identity"><strong>' + esc(adminProductName(grant.product)) +
+          '<li class="admin-row"><div class="admin-identity"><strong>' +
+          esc(grant.product === platformGrant ? "Platform access" : adminProductName(grant.product)) +
           '</strong><span class="muted">' + esc(adminLabel(grant.role)) + "</span></div>" +
           pill(grant.status, adminLabel(grant.status)) + "</li>",
         ).join("");
@@ -1215,6 +1231,11 @@ export function createApp(store, env, client = authClient(env)) {
           '<p class="muted">Onesa user ID <code>' + esc(user.id) + "</code></p>" +
           (registrationRows || requestRows ? '<section class="admin-detail"><h3>Requests and registration</h3>' + registrationRows + requestRows + "</section>" : "") +
           (grantRows ? '<section><h3>Product access</h3><ul class="admin-list">' + grantRows + "</ul></section>" : "") +
+          (platformAdministrator && session.id !== user.id && user.status === "active" ?
+            post("/admin/change", session.csrf, base + hidden("kind", "platform-administrator") +
+              (grants.some(grant => grant.product === platformGrant && grant.status === "active")
+                ? '<button name="status" value="revoked">Remove platform administrator</button>'
+                : '<button name="status" value="active">Grant platform administrator</button>')) : "") +
           '<details class="admin-panel admin-form"><summary>Manage account status</summary><div class="admin-panel-body">' +
           post("/admin/change", session.csrf, base + hidden("kind", "status") +
             '<label>Account status<select name="status">' +

@@ -126,11 +126,11 @@ export function accountAuthenticator(store, key) {
       return updated.changes ? browser : null;
     },
     showPasoFi(browser, now) {
-      const flow = store.one(`SELECT f.id,f.csrf,a.email,f.continuation,f.enrollment,p.ciphertext IS NOT NULL AS enrolled
+      const flow = store.one(`SELECT f.id,f.csrf,a.email,f.audience,f.continuation,f.enrollment,p.ciphertext IS NOT NULL AS enrolled
         FROM pasofi_authenticator_flows f JOIN accounts a ON a.id=f.id AND a.status='active'
         LEFT JOIN account_authenticators p ON p.id=f.id
         WHERE f.browser_hash=? AND f.expires>? AND f.verified_at IS NULL`, digest(browser), now);
-      return flow && { csrf: flow.csrf, email: flow.email, enrolled: flow.enrolled, continuation: flow.continuation,
+      return flow && { csrf: flow.csrf, email: flow.email, audience: flow.audience, enrolled: flow.enrolled, continuation: flow.continuation,
         setupKey: !flow.enrolled && flow.enrollment ? base32(open(flow.enrollment, flow.id)) : null };
     },
     verifyPasoFi(browser, code, now) {
