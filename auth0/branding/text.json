@@ -2,24 +2,24 @@
   "en": {
     "login": {
       "title": "Sign in",
-      "description": "Continue to ${clientName}.",
+      "description": "Enter your email and password.",
       "signupActionLinkText": "Create account"
     },
     "signup": {
       "title": "Create account",
-      "description": "Continue to ${clientName}.",
+      "description": "Enter your email and choose a password.",
       "loginActionLinkText": "Sign in"
     }
   },
   "de": {
     "login": {
       "title": "Anmelden",
-      "description": "Weiter zu ${clientName}.",
+      "description": "Gib deine E-Mail-Adresse und dein Passwort ein.",
       "signupActionLinkText": "Konto erstellen"
     },
     "signup": {
       "title": "Konto erstellen",
-      "description": "Weiter zu ${clientName}.",
+      "description": "Gib deine E-Mail-Adresse ein und wähle ein Passwort.",
       "loginActionLinkText": "Anmelden"
     }
   }
