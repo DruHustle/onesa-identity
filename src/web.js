@@ -884,7 +884,7 @@ export function createApp(store, env, client = authClient(env)) {
         accessRequest || ordinarySignup ? undefined : tier,
         destination ? product : null,
         undefined,
-        Boolean(accessRequest) || ordinarySignup,
+        Boolean(accessRequest) || ordinarySignup || (tier === "user" && Boolean(destination)),
       );
       target.searchParams.delete("enrollment");
       if (["suspended", "rejected"].includes(user.status))
