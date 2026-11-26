@@ -359,7 +359,7 @@ export function openStore(path, { existingOnly = false } = {}) {
       !one("SELECT 1 FROM product_administrators WHERE id=? AND status='active'", id) &&
       ![...registrations(db, id).values()].includes("active");
   }
-  function recordProductEnrollment(account, product, tier) {
+  function recordProductEnrollment(account, product, tier, application) {
     check(accountProducts.has(product), "Product unavailable");
     check(tier === "user" || tier === "admin", "Invalid registration type");
     if (tier === "admin") {
@@ -372,6 +372,9 @@ export function openStore(path, { existingOnly = false } = {}) {
     }
     const { id } = account;
     const { role } = accountProducts.get(product);
+    if (application && ((account.status === "pending" && !canActivateForProduct(id, product)) ||
+        one("SELECT 1 FROM account_deletion_requests WHERE id=?", id)))
+      return;
     if (sharedRole(product, registrations(db, id), false) ||
         one("SELECT 1 FROM product_administrators WHERE id=? AND product=? AND status='active'", id, product))
       return;
@@ -380,7 +383,7 @@ export function openStore(path, { existingOnly = false } = {}) {
       id, product, role,
     );
     if (!inserted.changes) return;
-    audit(id, "verified-product-enrollment", id, { product, role, status: "active" });
+    audit(id, "verified-product-enrollment", id, { product, role, status: "active", ...application });
     if (account.status === "pending" && canActivateForProduct(id, product)) {
       run("UPDATE accounts SET status='active' WHERE id=?", id);
       audit(id, "status", id, { kind: "status", status: "active" });
@@ -397,7 +400,7 @@ export function openStore(path, { existingOnly = false } = {}) {
       for (const scope of requested) recordProductAdministratorRequest(id, scope);
     });
   }
-  function register(issuer, sub, email, invitation = "", tier, product = null) {
+  function register(issuer, sub, email, invitation = "", tier, product = null, application) {
     return atomic(() => {
       check(
         typeof email === "string" &&
@@ -425,7 +428,7 @@ export function openStore(path, { existingOnly = false } = {}) {
             issuer,
           });
         }
-        if (product) recordProductEnrollment(linked, product, tier);
+        if (product) recordProductEnrollment(linked, product, tier, application);
         else if (tier) recordRequest(linked.id, tier);
         return lookup(issuer, sub);
       }
@@ -461,7 +464,7 @@ export function openStore(path, { existingOnly = false } = {}) {
       audit(id, invite ? "accept-invitation" : "register", id, {
         status: "pending",
       });
-      if (product) recordProductEnrollment({ id, status: "pending" }, product, tier);
+      if (product) recordProductEnrollment({ id, status: "pending" }, product, tier, application);
       else if (tier !== undefined) recordRequest(id, tier ?? "user", false);
       return lookup(issuer, sub);
     });

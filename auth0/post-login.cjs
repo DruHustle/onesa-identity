@@ -105,6 +105,16 @@ async function applyPolicy(event, api, continuing = false) {
     resourceAudience = audience.audience;
     infrastructure = audience.infrastructure;
     portainer = audience.portainer === true;
+    const enrollment = !continuing && !infrastructure &&
+      event.transaction?.protocol === "oidc-basic-profile" &&
+      typeof event.transaction.redirect_uri === "string" && typeof event.user.email === "string"
+      ? {
+          verified: true,
+          protocol: event.transaction.protocol,
+          redirectUri: event.transaction.redirect_uri,
+          email: event.user.email,
+        }
+      : undefined;
     const result = await fetch(url, {
       method: "POST",
       redirect: "error",
@@ -117,6 +127,7 @@ async function applyPolicy(event, api, continuing = false) {
         subject: event.user.user_id,
         audience: audience.audience,
         client: event.client.client_id,
+        enrollment,
       }),
     });
     if (!result.ok) return deny();

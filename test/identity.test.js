@@ -18,6 +18,7 @@ import {
   rollbackDelta,
 } from "../migration/reconcile.js";
 import action from "../auth0/post-login.cjs";
+import signupAction from "../auth0/pre-registration.cjs";
 import { applyProofs } from "../migration/link-proof.js";
 import { bootstrapIdentityAdmin } from "../migration/identity-admin.js";
 test("audit chain upgrades legacy rows, blocks mutation and detects tampering", () => {
@@ -275,6 +276,121 @@ async function fixture(t, overrides = {}) {
   });
   return { store, call, login, admin, setRedeem: (next) => { redeem = next ?? defaultRedeem; } };
 }
+
+test("shared clients enroll from an exact verified product callback and check grants on every refresh", async (t) => {
+  const pasoFi = "https://pasofi-api.example.test";
+  const farmer = "https://farmer-api.example.test";
+  const documents = "https://internal-api.example.test";
+  const web = "shared-web";
+  const native = "shared-native";
+  const pasoFiWeb = "https://pasofi.example.test/callback";
+  const pasoFiNative = "https://app.pasofi.example.test/ios/callback";
+  const farmerWeb = "https://farmer.example.test/callback";
+  const docsWeb = "https://docs.example.test/callback";
+  const catalog = {
+    [pasoFi]: { product: "pasofi", clients: [web, native], enrollmentCallbacks: [
+      { client: web, redirectUri: pasoFiWeb }, { client: native, redirectUri: pasoFiNative },
+    ] },
+    [farmer]: { product: "farmer", clients: [web], enrollmentCallbacks: [{ client: web, redirectUri: farmerWeb }] },
+    [documents]: { product: "internal-documents", clients: [web] },
+  };
+  const config = resourceCatalog => configuration({
+    OIDC_ISSUER: env.issuer, IDENTITY_ORIGIN: env.origin, OIDC_CLIENT_ID: env.clientId,
+    OIDC_CLIENT_SECRET: "test-client-secret", ACTION_POLICY_KEY: env.policyKey.padEnd(32, "x"),
+    RESOURCE_CLIENTS_JSON: JSON.stringify(resourceCatalog),
+  });
+  for (const [audience, change] of [
+    [pasoFi, [{ client: web, redirectUri: farmerWeb }]],
+    [pasoFi, [{ client: web, redirectUri: pasoFiWeb + "?extra=1" }]],
+    [pasoFi, [{ client: "unbound-client", redirectUri: pasoFiWeb }]],
+    [pasoFi, [{ client: env.clientId, redirectUri: env.origin + "/callback" }]],
+    [documents, [{ client: web, redirectUri: docsWeb }]],
+  ]) {
+    assert.throws(() => config({ ...catalog, [audience]: {
+      ...catalog[audience], enrollmentCallbacks: change,
+    } }), /Invalid application enrollment registry/);
+  }
+  const { resources, policyKey } = config(catalog);
+  const { store, call } = await fixture(t, { resources, policyKey });
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    assert.equal(new URL(url).origin, env.origin);
+    assert.equal(options.redirect, "error");
+    return call(new URL(url).pathname, options.method, options.body, options.headers);
+  });
+  const log = t.mock.method(console, "log", () => {});
+  const secrets = {
+    POLICY_ORIGIN: env.origin, POLICY_URL: env.origin + "/internal/decision", POLICY_KEY: policyKey,
+    ACCOUNT_CLIENT_ID: env.clientId,
+  };
+  const transaction = { protocol: "oidc-basic-profile", redirect_uri: pasoFiWeb, response_type: ["code"] };
+  for (const [client, redirectUri, allowed] of [
+    [undefined, pasoFiWeb, true],
+    [web, pasoFiWeb, true],
+    [native, pasoFiNative, true],
+    [native, pasoFiWeb, false],
+    [web, docsWeb, false],
+    [web, pasoFiWeb + "?extra=1", false],
+  ]) {
+    const denied = [];
+    await signupAction.onExecutePreUserRegistration({
+      secrets,
+      client: client ? { client_id: client } : undefined,
+      transaction: { ...transaction, redirect_uri: redirectUri },
+    }, { access: { deny: reason => denied.push(reason) } });
+    assert.equal(!denied.length, allowed);
+  }
+  assert.equal(log.mock.callCount(), 3);
+
+  const subject = "auth0|pasofi-shared-fixture";
+  const email = "new-from-product@example.test";
+  async function issue(overrides = {}) {
+    const claims = {};
+    const denied = [];
+    const event = {
+      secrets, transaction, user: { user_id: subject, email, email_verified: true },
+      resource_server: { identifier: pasoFi }, client: { client_id: web },
+      ...overrides,
+    };
+    await action.onExecutePostLogin(event, {
+      access: { deny: reason => denied.push(reason) },
+      accessToken: { setCustomClaim: (key, value) => { claims[key.replace("https://onesa.eu/claims/", "")] = value; } },
+    });
+    return { claims, denied };
+  }
+  const refresh = { protocol: "oauth2-refresh-token", redirect_uri: pasoFiWeb };
+  for (const event of [
+    { user: { user_id: subject, email, email_verified: false } },
+    { transaction: refresh },
+    { resource_server: { identifier: farmer } },
+    { resource_server: { identifier: documents }, transaction: { ...transaction, redirect_uri: docsWeb } },
+    { client: { client_id: native } },
+  ]) {
+    assert.equal((await issue(event)).denied.length, 1);
+    assert.equal(store.lookup(env.issuer, subject), undefined);
+  }
+  const first = await issue();
+  assert.deepEqual(first.denied, []);
+  assert.deepEqual(first.claims, { user_id: first.claims.user_id, products: ["pasofi"], roles: ["customer"] });
+  const account = store.lookup(env.issuer, subject);
+  assert.equal(account.id, first.claims.user_id);
+  assert.deepEqual((await issue({ transaction: refresh })).claims, first.claims);
+  assert.equal((await issue({ transaction: refresh, resource_server: { identifier: farmer } })).denied.length, 1);
+  assert.equal((await issue({ user: { user_id: "auth0|duplicate", email, email_verified: true } })).denied.length, 1);
+  const rows = store.all("SELECT detail FROM audit WHERE action='verified-product-enrollment' AND target=?", account.id);
+  assert.deepEqual(rows.map(row => JSON.parse(row.detail)), [
+    { product: "pasofi", role: "customer", status: "active", client: web, subject },
+  ]);
+  const farmerEntry = await issue({ resource_server: { identifier: farmer },
+    transaction: { ...transaction, redirect_uri: farmerWeb } });
+  assert.deepEqual(farmerEntry.claims, { user_id: account.id, products: ["farmer"], roles: ["user"] });
+  store.change("reviewer", account.id, store.lookup(env.issuer, subject).revision,
+    { kind: "grant", product: "pasofi", role: "customer", status: "revoked" });
+  assert.equal((await issue({ transaction: refresh })).denied.length, 1);
+  assert.equal((await issue()).denied.length, 1);
+  assert.equal(store.activeGrant(account.id, "pasofi"), undefined);
+  assert.deepEqual((await issue({ transaction: refresh, resource_server: { identifier: farmer } })).claims,
+    farmerEntry.claims);
+});
 test("the Onesa Account entry preserves invitations for sign-in and registration", async (t) => {
   const { call, store } = await fixture(t);
   const invitation = store.invite("identity-admin", "invitee@onesa.test");

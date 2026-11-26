@@ -20,6 +20,10 @@ const compare = (a, b) =>
   typeof a === "string" &&
   typeof b === "string" &&
   timingSafeEqual(Buffer.from(digest(a)), Buffer.from(digest(b)));
+const enrollmentCallback = (resource, client, redirectUri) =>
+  typeof redirectUri === "string" &&
+  resource?.enrollmentCallbacks?.some(callback =>
+    callback.redirectUri === redirectUri && (client === undefined || callback.client === client));
 const cookie = (name, value, seconds) =>
   "__Host-onesa-" +
   name +
@@ -563,13 +567,20 @@ export function createApp(store, env, client = authClient(env)) {
           '<label>Six-digit code<input name="code" required pattern="[0-9]{6}" maxlength="6" inputmode="numeric" autocomplete="one-time-code"></label>' +
           '<button class="primary">Verify and continue</button>') + '</div>', feedback ? 400 : 200);
     }
+    if (p === "/internal/signup-entry" && method === "POST") {
+      if (!compare(req.headers.get("authorization"), "Bearer " + env.policyKey))
+        return new Response(null, { status: 401 });
+      const { client, redirectUri } = await req.json();
+      const registered = [...env.resources.values()].some(resource => enrollmentCallback(resource, client, redirectUri));
+      return new Response(null, { status: registered ? 204 : 403 });
+    }
     if (p === "/internal/decision" && method === "POST") {
       if (!compare(req.headers.get("authorization"), "Bearer " + env.policyKey))
         return new Response(null, { status: 401 });
-      const { subject, audience, client: clientId } = await req.json();
+      const { subject, audience, client: clientId, enrollment } = await req.json();
       if (typeof subject !== "string" || subject.length > 512 || !subject)
         return new Response(null, { status: 403 });
-      const actor = store.lookup(env.issuer, subject);
+      let actor = store.lookup(env.issuer, subject);
       if (actor && ["suspended", "rejected"].includes(actor.status))
         return new Response(null, { status: 403 });
       if (
@@ -578,15 +589,26 @@ export function createApp(store, env, client = authClient(env)) {
       )
         return Response.json({ selfservice: true });
       const resource = env.resources.get(audience);
-      if (!actor || !resource || !resource.clients.includes(clientId))
+      if (!resource || !resource.clients.includes(clientId))
         return new Response(null, { status: 403 });
       let product = resource.product;
+      if (enrollment?.verified === true && enrollment.protocol === "oidc-basic-profile" &&
+          enrollmentCallback(resource, clientId, enrollment.redirectUri) &&
+          (!actor || !store.one("SELECT 1 FROM grants WHERE id=? AND product=?", actor.id, product))) {
+        try {
+          actor = store.register(env.issuer, subject, enrollment.email, "", "user", product,
+            { client: clientId, subject });
+        } catch (error) {
+          if (error instanceof Rejected) return new Response(null, { status: 403 });
+          throw error;
+        }
+      }
+      if (actor?.status !== "active") return new Response(null, { status: 403 });
       // An explicit canonical decision, including removal, supersedes legacy membership.
       if (product === "internal-documents" &&
           !store.one("SELECT 1 FROM grants WHERE id=? AND product=?", actor.id, product)) {
         product = "engineering-documents";
       }
-      if (actor.status !== "active") return new Response(null, { status: 403 });
       const explicit = store.one("SELECT role,status FROM grants WHERE id=? AND product=?", actor.id, product);
       const managedAdministrator = store.activeProductAdministrator(actor.id, product);
       const assignedRole = explicit
@@ -608,7 +630,8 @@ export function createApp(store, env, client = authClient(env)) {
         // Every privileged role requires recent MFA, including explicit grants.
         // An explicit product grant must never downgrade the authentication
         // requirements of the identical role inherited through registration.
-        ...(["administrator", "owner"].includes(role)
+        ...(["administrator", "owner"].includes(role) ||
+          (resource.enrollmentCallbacks && product === "pasofi" && ["agent", "support"].includes(role))
           ? { require_mfa: true } : {}),
       });
     }
