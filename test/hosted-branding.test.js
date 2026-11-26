@@ -25,7 +25,7 @@ test("installs a new default theme and verifies both login flow types in both la
   assert.deepEqual(t.writes, []);
   await syncBranding(t.request, true);
   assert.deepEqual(t.writes[0], ["POST", "/branding/themes"]);
-  assert.equal(t.prompts.get("/prompts/signup-id/custom-text/de")["signup-id"].title, "Onesa-Konto erstellen");
+  assert.equal(t.prompts.get("/prompts/signup-id/custom-text/de")["signup-id"].title, "Konto erstellen");
   assert.deepEqual(await syncBranding(t.request), []);
   const count = t.writes.length;
   await syncBranding(t.request, true);
@@ -40,6 +40,7 @@ test("preserves unmanaged tenant fields and unrelated localized prompt overrides
   assert.deepEqual(t.writes[0], ["PATCH", "/branding/themes/test"]);
   assert.equal(t.current().widget.extra, true);
   assert.equal(t.current().fonts.font_url, "https://example.org/font.woff2");
+  assert.equal(t.prompts.get(path).login.title, "Sign in");
   assert.equal(t.prompts.get(path).login.forgotPasswordText, "Recover account");
   assert.equal(t.prompts.get(path).other.title, "Keep");
   assert.match(t.prompts.get(path).login.description, /\$\{clientName\}/);

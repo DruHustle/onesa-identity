@@ -132,6 +132,22 @@ async function applyPolicy(event, api, continuing = false) {
     decision.roles.length !== 1 ||
     !["administrator", "owner"].includes(decision.roles[0])
   )) return deny();
+  const transaction = event.transaction || {};
+  const requested = Array.isArray(transaction.acr_values)
+    ? transaction.acr_values
+    : String(transaction.acr_values || "").split(/\s+/).filter(Boolean);
+  if (decision.product === "pasofi" && requested.includes("urn:onesa:authentication:pasofi-customer") &&
+      transaction.protocol !== "oauth2-refresh-token") {
+    // A customer transaction can only lose privileges. The staff entry
+    // still requires its own authorization and fresh authenticator proof.
+    if (continuing || requested.length !== 1 || transaction.protocol !== "oidc-basic-profile" ||
+        !decision.user_id || !Array.isArray(decision.roles) || decision.roles.length !== 1 ||
+        !["customer", "admin", "administrator"].includes(decision.roles[0])) return deny();
+    api.accessToken.setCustomClaim(ns + "user_id", decision.user_id);
+    api.accessToken.setCustomClaim(ns + "products", ["pasofi"]);
+    api.accessToken.setCustomClaim(ns + "roles", ["customer"]);
+    return;
+  }
   // Token issuance time is not evidence of a fresh factor.
   const observed = (event.authentication?.methods || [])
     .filter((m) => m.name === "mfa")
@@ -179,10 +195,6 @@ async function applyPolicy(event, api, continuing = false) {
   if (!pasoFiRenewal && (decision.require_mfa === true || infrastructure) &&
       (!mfaTime || mfaTime > Math.floor(Date.now() / 1000) ||
        Math.floor(Date.now() / 1000) - mfaTime > 300)) return deny();
-  const transaction = event.transaction || {};
-  const requested = Array.isArray(transaction.acr_values)
-    ? transaction.acr_values
-    : String(transaction.acr_values || "").split(/\s+/);
   const operation = transaction.protocol !== "oauth2-refresh-token" &&
     requested.includes("urn:onesa:authentication:operation-mfa");
   if (operation) {

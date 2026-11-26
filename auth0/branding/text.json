@@ -1,26 +1,26 @@
 {
   "en": {
     "login": {
-      "title": "Sign in to Onesa",
-      "description": "Sign in once with your Onesa account to access ${clientName}.",
-      "signupActionLinkText": "Create an Onesa account"
+      "title": "Sign in",
+      "description": "Continue to ${clientName}.",
+      "signupActionLinkText": "Create account"
     },
     "signup": {
-      "title": "Create an Onesa account",
-      "description": "Create one Onesa account to request access to ${clientName}.",
-      "loginActionLinkText": "Sign in to Onesa"
+      "title": "Create account",
+      "description": "Continue to ${clientName}.",
+      "loginActionLinkText": "Sign in"
     }
   },
   "de": {
     "login": {
-      "title": "Bei Onesa anmelden",
-      "description": "Melden Sie sich einmal mit Ihrem Onesa-Konto an, um ${clientName} zu öffnen.",
-      "signupActionLinkText": "Onesa-Konto erstellen"
+      "title": "Anmelden",
+      "description": "Weiter zu ${clientName}.",
+      "signupActionLinkText": "Konto erstellen"
     },
     "signup": {
-      "title": "Onesa-Konto erstellen",
-      "description": "Erstellen Sie ein Onesa-Konto, um Zugriff auf ${clientName} zu beantragen.",
-      "loginActionLinkText": "Bei Onesa anmelden"
+      "title": "Konto erstellen",
+      "description": "Weiter zu ${clientName}.",
+      "loginActionLinkText": "Anmelden"
     }
   }
 }
