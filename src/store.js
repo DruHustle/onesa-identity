@@ -337,6 +337,20 @@ export function openStore(path, { existingOnly = false } = {}) {
       id,
       product,
     );
+  const staffRequest = (id) => one(`SELECT json_extract(detail,'$.status') AS status
+    FROM audit WHERE target=? AND action='product-staff-request' ORDER BY seq DESC LIMIT 1`, id)?.status;
+  function requestProductStaff(id) {
+    return atomic(() => {
+      const account = one("SELECT status FROM accounts WHERE id=?", id);
+      check(["active", "pending"].includes(account?.status) &&
+        !one("SELECT 1 FROM account_deletion_requests WHERE id=?", id), "Account unavailable");
+      const previous = staffRequest(id);
+      if ((previous && previous !== "deleted") || ["agent", "support", "administrator"].includes(activeGrant(id, "pasofi")?.role) ||
+          activeProductAdministrator(id, "pasofi")) return;
+      audit(id, "product-staff-request", id, { product: "pasofi", role: "agent", status: "pending" });
+      run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
+    });
+  }
   function recordRequest(id, tier, existing = true) {
     check(tier === "user" || tier === "admin", "Invalid registration type");
     if (registrations(db, id).has(tier)) return;
@@ -401,7 +415,7 @@ export function openStore(path, { existingOnly = false } = {}) {
       for (const scope of requested) recordProductAdministratorRequest(id, scope);
     });
   }
-  function register(issuer, sub, email, invitation = "", tier, product = null, application) {
+  function register(issuer, sub, email, invitation = "", tier, product = null, application, activate = false) {
     return atomic(() => {
       check(
         typeof email === "string" &&
@@ -455,11 +469,12 @@ export function openStore(path, { existingOnly = false } = {}) {
         check(invite, "Invitation expired or unavailable");
       }
       const id = randomUUID();
+      const status = activate ? "active" : "pending";
       run(
         "INSERT INTO accounts(id,email,status) VALUES(?,?,?)",
         id,
         contact,
-        "pending",
+        status,
       );
       run(
         "INSERT INTO links VALUES(?,?,?,?)",
@@ -469,9 +484,9 @@ export function openStore(path, { existingOnly = false } = {}) {
         "verified-provider-registration",
       );
       audit(id, invite ? "accept-invitation" : "register", id, {
-        status: "pending",
+        status,
       });
-      if (product) recordProductEnrollment({ id, status: "pending" }, product, tier, application);
+      if (product) recordProductEnrollment({ id, status }, product, tier, application);
       else if (tier !== undefined) recordRequest(id, tier ?? "user", false);
       return lookup(issuer, sub);
     });
@@ -559,6 +574,8 @@ export function openStore(path, { existingOnly = false } = {}) {
         if (status === "active" || status === "pending")
           audit(id, "product-administrator-request", id, { product, status: "revoked" });
       }
+      if (["active", "pending"].includes(staffRequest(id)))
+        audit(id, "product-staff-request", id, { product: "pasofi", role: "agent", status: "revoked" });
       run("UPDATE grants SET status='revoked' WHERE id=? AND status IN ('active','pending')", id);
       run("UPDATE accounts SET status='suspended',revision=revision+1 WHERE id=?", id);
       run("DELETE FROM sessions WHERE id=?", id);
@@ -573,6 +590,26 @@ export function openStore(path, { existingOnly = false } = {}) {
         current && current.revision === revision,
         "Account changed; reload before editing",
       );
+      if (operation.kind === "product-staff-review") {
+        check(scopeProduct === "pasofi" && actor !== id &&
+          (activeGrant(actor, "identity")?.role === "administrator" ||
+           activeGrant(actor, platformGrant)?.role === "administrator" ||
+           activeGrant(actor, "pasofi")?.role === "administrator" || activeProductAdministrator(actor, "pasofi")),
+        "A PasoFi administrator must review this request");
+        const previous = staffRequest(id);
+        check((previous === "pending" && ["active", "rejected", "deleted"].includes(operation.status)) ||
+          (previous === "active" && operation.status === "revoked"), "The request has changed. Reload before reviewing.");
+        check(["active", "pending"].includes(current.status) && one("SELECT 1 FROM links WHERE id=? LIMIT 1", id) &&
+          !one("SELECT 1 FROM account_deletion_requests WHERE id=?", id), "A verified account is required");
+        if (operation.status === "active" && current.status === "pending") {
+          check(canActivateForProduct(id, "pasofi"), "Ask an Identity administrator to review this account before approving access");
+          run("UPDATE accounts SET status='active' WHERE id=?", id);
+          audit(actor, "status", id, { kind: "status", status: "active" });
+        }
+        audit(actor, "product-staff-request", id, { product: "pasofi", role: "agent", status: operation.status });
+        run("UPDATE accounts SET revision=revision+1 WHERE id=?", id);
+        return;
+      }
       if (operation.kind === "platform-administrator" ||
           (operation.kind === "status" && operation.status !== "active" && activeGrant(id, platformGrant))) {
         check(!scopeProduct && actor !== id && activeGrant(actor, platformGrant)?.role === "administrator",
@@ -600,7 +637,7 @@ export function openStore(path, { existingOnly = false } = {}) {
           "Product administrators may only manage their own administrator list",
         );
         check(actor !== id, "Ask another product administrator to change your own access");
-        check(one("SELECT 1 FROM links WHERE id=? LIMIT 1", id), "A verified Onesa account is required");
+        check(one("SELECT 1 FROM links WHERE id=? LIMIT 1", id), "A verified account is required");
         const request = productAdministratorRequests(db, id).get(scopeProduct);
         if (review) {
           check(request === "pending" && ["active", "rejected", "deleted"].includes(operation.status),
@@ -617,7 +654,7 @@ export function openStore(path, { existingOnly = false } = {}) {
             audit(actor, "status", id, { kind: "status", status: "active" });
           }
         } else {
-          check(current.status === "active", "Administrator access requires an active Onesa account");
+          check(current.status === "active", "Administrator access requires an active account");
           check(["active", "revoked"].includes(operation.status), "Invalid administrator state");
         }
         if (operation.status === "revoked") {
@@ -760,6 +797,8 @@ export function openStore(path, { existingOnly = false } = {}) {
     lookup,
     activeGrant,
     activeProductAdministrator,
+    staffRequest,
+    requestProductStaff,
     register,
     requestAccess,
     requestRegistration,
