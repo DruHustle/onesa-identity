@@ -8,13 +8,18 @@ import { infrastructureEntry, registrationReturns, returnKey } from "./registrat
 const hostname = url => url.hostname.replace(/\.$/, "");
 const productionIdentityHosts = ["account.onesa.eu", "auth.onesa.eu", "onesa.eu.auth0.com"];
 
-function stagingRegistrationReturns(issuer, account, override) {
+function productionRegistrationHosts() {
   const productionAccount = "https://account.onesa.eu";
   const productionHosts = new Set([...productionIdentityHosts, "portainer.onesa.eu"]);
   for (const target of registrationReturns(productionAccount).values()) {
     const url = new URL(target);
     if (url.protocol === "https:") productionHosts.add(hostname(url));
   }
+  return productionHosts;
+}
+
+function stagingRegistrationReturns(issuer, account, override) {
+  const productionHosts = productionRegistrationHosts();
   if (hostname(issuer) === hostname(account) ||
       [issuer, account].some(url => productionHosts.has(hostname(url))))
     throw Error("Staging requires separate nonproduction issuer and Account hosts");
@@ -67,6 +72,7 @@ export function configuration(env) {
     catalog = JSON.parse(required("RESOURCE_CLIENTS_JSON"));
   const clientId = required("OIDC_CLIENT_ID");
   const enrollmentReturns = new Set([origin.origin + "/callback"]);
+  const productionHosts = isStaging ? productionRegistrationHosts() : new Set();
   for (const [audience, resource] of Object.entries(catalog)) {
     let endpoint;
     try {
@@ -111,6 +117,7 @@ export function configuration(env) {
         if (!destination || destination.protocol !== "https:" || destination.href !== callback.redirectUri ||
             destination.username || destination.password || destination.search || destination.hash ||
             destination.hostname === origin.hostname || destination.hostname === issuer.hostname ||
+            productionHosts.has(hostname(destination)) ||
             callback.client === clientId || !resource.clients.includes(callback.client) ||
             enrollmentReturns.has(destination.href))
           throw Error("Invalid application enrollment registry");

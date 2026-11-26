@@ -414,6 +414,12 @@ export function openStore(path, { existingOnly = false } = {}) {
         // A disabled account must not mutate its verified contact or reopen
         // registrations just because the upstream provider signed it in.
         check(["active", "pending"].includes(linked.status), "Account unavailable");
+        if (application) {
+          const ordinary = registrations(db, linked.id).get("user");
+          check(!["revoked", "rejected"].includes(ordinary) &&
+            !one("SELECT 1 FROM account_deletion_requests WHERE id=?", linked.id),
+            "Ordinary access needs review");
+        }
         if (linked.email !== contact) {
           // Only the same verified issuer/subject may refresh its contact
           // address. An email collision never transfers another account.

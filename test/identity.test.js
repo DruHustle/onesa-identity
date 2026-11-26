@@ -219,6 +219,12 @@ test("Oracle staging requires a separate issuer, Account host, data store and da
   }
   assert.throws(() => configuration({...stage, AUTH0_VERIFICATION_ORIGIN: "https://onesa.eu.auth0.com",
     AUTH0_VERIFICATION_CLIENT_ID: "stage-verification"}), /separate email verification tenant/);
+  assert.throws(() => configuration({ ...stage, RESOURCE_CLIENTS_JSON: JSON.stringify({
+    "https://pasofi-api.staging.test": {
+      product: "pasofi", clients: ["stage-web"],
+      enrollmentCallbacks: [{client:"stage-web", redirectUri:"https://pasofi.mobile.onesa.eu/onesa-callback.html"}],
+    },
+  }) }), /Invalid application enrollment registry/);
 });
 
 async function fixture(t, overrides = {}) {
@@ -311,7 +317,7 @@ test("shared clients enroll from an exact verified product callback and check gr
     } }), /Invalid application enrollment registry/);
   }
   const { resources, policyKey } = config(catalog);
-  const { store, call } = await fixture(t, { resources, policyKey });
+  const { store, call, admin } = await fixture(t, { resources, policyKey });
   t.mock.method(globalThis, "fetch", async (url, options) => {
     assert.equal(new URL(url).origin, env.origin);
     assert.equal(options.redirect, "error");
@@ -390,6 +396,16 @@ test("shared clients enroll from an exact verified product callback and check gr
   assert.equal(store.activeGrant(account.id, "pasofi"), undefined);
   assert.deepEqual((await issue({ transaction: refresh, resource_server: { identifier: farmer } })).claims,
     farmerEntry.claims);
+  const formerSubject = "auth0|legacy-ordinary-fixture";
+  const formerEmail = "legacy-ordinary@example.test";
+  const former = store.register(env.issuer, formerSubject, formerEmail, "", "user");
+  store.change(admin.id, former.id, former.revision, { kind: "status", status: "active" });
+  store.change(admin.id, former.id, store.lookup(env.issuer, formerSubject).revision,
+    { kind: "registration", tier: "user", status: "active" });
+  store.change(admin.id, former.id, store.lookup(env.issuer, formerSubject).revision,
+    { kind: "registration", tier: "user", status: "revoked" });
+  assert.equal((await issue({ user: { user_id: formerSubject, email: formerEmail, email_verified: true } })).denied.length, 1);
+  assert.equal(store.activeGrant(former.id, "pasofi"), undefined);
 });
 test("the Onesa Account entry preserves invitations for sign-in and registration", async (t) => {
   const { call, store } = await fixture(t);
