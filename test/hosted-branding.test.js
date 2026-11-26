@@ -43,5 +43,5 @@ test("preserves unmanaged tenant fields and unrelated localized prompt overrides
   assert.equal(t.prompts.get(path).login.title, "Sign in");
   assert.equal(t.prompts.get(path).login.forgotPasswordText, "Recover account");
   assert.equal(t.prompts.get(path).other.title, "Keep");
-  assert.match(t.prompts.get(path).login.description, /\$\{clientName\}/);
+  assert.equal(t.prompts.get(path).login.description, "Enter your email and password.");
 });
