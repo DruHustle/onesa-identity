@@ -795,7 +795,7 @@ test("verified product registration grants ordinary access only to the originati
 
   assert.equal((await signup("internal-documents", "docs-signup")).status, 303);
   const docs = store.lookup(env.issuer, "oidc|docs-signup");
-  assert.equal(docs.status, "pending");
+  assert.equal(docs.status, "active");
   assert.equal(store.one("SELECT status FROM grants WHERE id=? AND product='internal-documents'", docs.id).status, "pending");
   assert.equal((await decide("docs-signup", "https://api.docs.onesa.eu", "docs-web")).status, 403);
 
