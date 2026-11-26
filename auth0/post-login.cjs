@@ -151,9 +151,12 @@ async function applyPolicy(event, api, continuing = false) {
       transaction.protocol !== "oauth2-refresh-token") {
     // A customer transaction can only lose privileges. The staff entry
     // still requires its own authorization and fresh authenticator proof.
+    const roles = decision.roles;
+    const customer = Array.isArray(roles) && (roles.length === 1 &&
+      ["customer", "admin", "administrator"].includes(roles[0]) ||
+      roles.length === 2 && roles.includes("customer") && roles.includes("agent"));
     if (continuing || requested.length !== 1 || transaction.protocol !== "oidc-basic-profile" ||
-        !decision.user_id || !Array.isArray(decision.roles) || decision.roles.length !== 1 ||
-        !["customer", "admin", "administrator"].includes(decision.roles[0])) return deny();
+        !decision.user_id || !customer) return deny();
     api.accessToken.setCustomClaim(ns + "user_id", decision.user_id);
     api.accessToken.setCustomClaim(ns + "products", ["pasofi"]);
     api.accessToken.setCustomClaim(ns + "roles", ["customer"]);
