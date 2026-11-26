@@ -40,7 +40,7 @@ const page = (title, body, status = 200, wide = false, administration = false, r
   new Response(`<!doctype html><html lang="en"><head>
     <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     ${resume ? '<meta http-equiv="refresh" content="0;url=' + esc(resume) + '">' : ""}
-    <title>${esc(title)} · Onesa Account</title>
+    <title>${esc(title)}</title>
     <style>
       * { box-sizing: border-box; }
       body { margin: 0; padding: 24px clamp(16px, 5vw, 64px) 48px; background: #F5F8F7; color: #172B4D; font: 1rem/1.55 Arial, Helvetica, sans-serif; }
@@ -140,7 +140,7 @@ const page = (title, body, status = 200, wide = false, administration = false, r
       .primary:hover { background: #095C4D; border-color: #095C4D; }
       :is(a, button, input, select, summary):focus-visible { outline: 3px solid #00B894; outline-offset: 3px; }
     </style></head><body>
-    <header><a href="/account"><img src="https://onesa.eu/brand/icons/v1/onesa-company-180.png" alt="" width="32" height="32">Onesa Account</a>
+    <header><a href="/account"><img src="https://onesa.eu/brand/icons/v1/onesa-company-180.png" alt="" width="32" height="32">Onesa</a>
     <nav aria-label="Account"><a href="/account">My account</a>${administration ? '<a href="/admin">Administration</a>' : ""}</nav></header>
     <main${wide ? ' class="wide"' : ""}><h1>${esc(title)}</h1>${body}</main></body></html>`,
     { status, headers: { "content-type": "text/html; charset=utf-8" } },
@@ -186,8 +186,8 @@ const signInFailure = (code, description, destination, env) => {
     invalid_request: ["Sign-in request could not be validated", "The sign-in request is incomplete or expired. Return to the product and start sign-in again.", 400],
     invalid_grant: ["Sign-in could not be completed", "The authorization code expired or was already used. Start a fresh sign-in from the product.", 400],
     mfa_required: ["Multi-factor authentication required", "Complete the multi-factor prompt to continue. If no prompt appears, restart sign-in and try again.", 403],
-    mfa_enrollment_needed: ["Authenticator setup required", "Set up the required authenticator for your Onesa account, then retry sign-in.", 403],
-    account_disabled: ["Onesa account disabled", "This Onesa account is disabled. Contact your Onesa administrator if you believe this is a mistake.", 403],
+    mfa_enrollment_needed: ["Authenticator setup required", "Set up the required authenticator for your account, then retry sign-in.", 403],
+    account_disabled: ["account disabled", "This account is disabled. Contact your Onesa administrator if you believe this is a mistake.", 403],
   };
   const known = Object.hasOwn(messages, code) ? messages[code] : null;
   if (known) {
@@ -208,6 +208,7 @@ const redirect = (url, cookies = []) => {
   return new Response(null, { status: 303, headers });
 };
 const accountSections = new Set(["#product-access", "#administrator-access", "#account-security", "#account-closure"]);
+const accessPath = (product, role) => "/access?" + new URLSearchParams({ product, role });
 const retryPath = (destination, origin) => {
   const target = new URL(destination, origin);
   const factorRoute = target.searchParams.get("_factor");
@@ -225,13 +226,13 @@ const retryPath = (destination, origin) => {
   }
   if (invite && /^[A-Za-z0-9_-]{43}$/.test(invite))
     return "/login?invite=" + encodeURIComponent(invite);
+  if (target.pathname === "/account" && target.searchParams.get("_signup") === "1")
+    return "/login?return=%2Faccount%3F_signup%3D1";
   if (target.pathname === "/account" && accountSections.has(target.hash))
     return "/login?return=" + encodeURIComponent("/account" + target.hash);
-  return target.pathname === "/admin"
+  return ["/admin", "/access"].includes(target.pathname)
     ? "/login?return=" + encodeURIComponent(
-        "/admin" + (target.searchParams.has("product")
-          ? "?product=" + encodeURIComponent(target.searchParams.get("product"))
-          : ""),
+        target.pathname + target.search,
       )
     : "/login";
 };
@@ -384,6 +385,14 @@ export function createApp(store, env, client = authClient(env)) {
   const requestedProducts = product => product === "intranet"
     ? [...intranet.keys()].filter(scope => connectedProducts.has(scope))
     : connectedProducts.has(product) && accountProducts.has(product) ? [product] : [];
+  function accessEntry(url) {
+    if (url.origin !== env.origin || url.pathname !== "/access") return null;
+    const product = url.searchParams.get("product"), role = url.searchParams.get("role");
+    if (url.searchParams.getAll("product").length !== 1 || url.searchParams.getAll("role").length !== 1 ||
+        !requestedProducts(product).length ||
+        (role !== "administrator" && !(role === "agent" && product === "pasofi"))) return null;
+    return { product, role, path: accessPath(product, role) };
+  }
   const adminEnabled = new Set(Array.from(env.resources.values())
     .filter(resource => ["admin", "administrator"].includes(resource.sharedAdminRole))
     .map(resource => resource.product));
@@ -399,7 +408,6 @@ export function createApp(store, env, client = authClient(env)) {
     const rows = [];
     const intranetAreas = [];
     const additionalAccess = [];
-    const additionalAdministrator = [];
     for (const [product, { name }] of accountProducts) {
       const legacy = product === "internal-documents" && decisions.get("engineering-documents");
       let decision = decisions.get(product) || legacy;
@@ -411,7 +419,6 @@ export function createApp(store, env, client = authClient(env)) {
       const request = administrator ? "active" : requests.get(product);
       const entry = [product, { name }];
       if (connected && !decision && !administrator) additionalAccess.push(entry);
-      if (connected && !request) additionalAdministrator.push(entry);
       if (!decision && !request) continue;
       const label = legacy && !decisions.has(product) ? "Internal Documents (Engineering)" : intranet.get(product) || name;
       const states = [];
@@ -442,13 +449,7 @@ export function createApp(store, env, client = authClient(env)) {
       (tiers.size ? '<details><summary>Earlier Onesa registration requests</summary>' +
         [...tiers].map(([tier, status]) => "<p>" + (tier === "admin" ? "Administrator" : "User") + " · " +
           esc(accessLabels[status]) + "</p>").join("") + "</details>" : "") + "</section>";
-    const administratorAccess = '<section class="account-panel" aria-labelledby="administrator-access">' +
-      '<h2 id="administrator-access">Administrator access</h2><p>Choose the product you need to administer. A reviewer must approve your request.</p>' +
-      (additionalAdministrator.length ? post("/account/enrollment", session.csrf, hidden("tier", "admin") +
-        '<div class="actions">' + productSelect("Product", additionalAdministrator) +
-        "<button>Request administrator access</button></div>") :
-        '<p>See your administrator access status under <a href="#product-access">Product access</a>.</p>') + "</section>";
-    return { accountAccess, administratorAccess };
+    return accountAccess;
   }
   async function handle(req) {
     const url = new URL(req.url),
@@ -509,7 +510,7 @@ export function createApp(store, env, client = authClient(env)) {
       return proof ? Response.json({ mfaTime: Math.floor(proof.verified_at / 1000) }) : new Response(null, { status: 403 });
     }
     if (p === pasoFiFactorPath && ["GET", "POST"].includes(method)) {
-      if (!authenticator) return page("Authenticator unavailable", '<a href="/account">Open Onesa Account</a>', 503);
+      if (!authenticator) return page("Authenticator unavailable", '<a href="/account">Open account settings</a>', 503);
       const now = Date.now();
       if (method === "GET" && url.searchParams.has("ticket")) {
         const ticket = url.searchParams.get("ticket");
@@ -530,9 +531,9 @@ export function createApp(store, env, client = authClient(env)) {
         if (!isPasoFi) return page("Start a fresh sign-in",
           "<p>Return to the app where you started and sign in again to set up your authenticator.</p>", 403);
         if (flow.continuation === "state") return page("Start a fresh PasoFi sign-in",
-          '<p>Confirm your Onesa sign-in from PasoFi before adding an authenticator.</p><a class="primary" href="https://pasofi.mobile.onesa.eu/#staff">Return to PasoFi Staff</a>', 403);
+          '<p>Confirm your sign-in from PasoFi before adding an authenticator.</p><a class="primary" href="https://pasofi.mobile.onesa.eu/#staff">Return to PasoFi Staff</a>', 403);
         return page("Set up your authenticator first",
-          '<p>Set up your authenticator in Onesa Account with the same account you use for PasoFi Staff.</p><a class="primary" href="/account#account-security">Open account security</a>', 403);
+          '<p>Set up your authenticator in account settings with the same account you use for PasoFi Staff.</p><a class="primary" href="/account#account-security">Open account security</a>', 403);
       }
       let feedback = "";
       if (method === "POST") {
@@ -629,7 +630,10 @@ export function createApp(store, env, client = authClient(env)) {
         ? (explicit.status === "active" && explicit.role)
         : sharedRole(product, registrations(store.db, actor.id),
           ["admin", "administrator"].includes(resource.sharedAdminRole));
-      const role = managedAdministrator ? "administrator" : assignedRole;
+      const approvedStaff = product === "pasofi" && store.staffRequest(actor.id) === "active";
+      const role = managedAdministrator || assignedRole === "administrator" ? "administrator"
+        : approvedStaff && (!explicit || explicit.status === "active") && (!assignedRole || assignedRole === "customer")
+          ? "agent" : assignedRole;
       if (!role || !products[product]?.includes(role) ||
           (!managedAdministrator && role === "administrator" && configurableAdminRoles.has(product) &&
             !["admin", "administrator"].includes(resource.sharedAdminRole)))
@@ -637,7 +641,7 @@ export function createApp(store, env, client = authClient(env)) {
       return Response.json({
         user_id: actor.id,
         product,
-        roles: [role],
+        roles: approvedStaff && role === "agent" && assignedRole === "customer" ? ["customer", role] : [role],
         ...(product === "portal" && role === "administrator" &&
           (!explicit || managedAdministrator && productAdministratorRequests(store.db, actor.id).get("portal") === "active")
           ? { portal_staff_registration: true } : {}),
@@ -645,7 +649,7 @@ export function createApp(store, env, client = authClient(env)) {
         // An explicit product grant must never downgrade the authentication
         // requirements of the identical role inherited through registration.
         ...(["administrator", "owner"].includes(role) ||
-          (resource.enrollmentCallbacks && product === "pasofi" && ["agent", "support"].includes(role))
+          (product === "pasofi" && ["agent", "support"].includes(role))
           ? { require_mfa: true } : {}),
       });
     }
@@ -675,22 +679,29 @@ export function createApp(store, env, client = authClient(env)) {
         verifier = oidc.randomPKCECodeVerifier();
       const requestedReturn = url.searchParams.get("return") || (p === "/step-up" ? "/admin" : "/account");
       const returnUrl = new URL(requestedReturn, env.origin);
+      const access = accessEntry(returnUrl);
       const requestedProduct = returnUrl.searchParams.get("product") || "";
       let destination = returnUrl.origin === env.origin && returnUrl.pathname === "/admin" &&
         (!requestedProduct || Object.hasOwn(products, requestedProduct))
           ? "/admin" + (requestedProduct ? "?product=" + encodeURIComponent(requestedProduct) : "")
           : "/account";
+      if (access) destination = access.path;
       if (returnUrl.origin === env.origin && returnUrl.pathname === "/account" && accountSections.has(returnUrl.hash))
         destination += returnUrl.hash;
+      if (p === "/login" && returnUrl.origin === env.origin && returnUrl.pathname === "/account" &&
+          returnUrl.searchParams.get("_signup") === "1") destination = "/account?_signup=1";
       const invitation = url.searchParams.get("invite");
       if (invitation && /^[\w-]{43}$/.test(invitation))
         destination = "/account?invite=" + invitation;
+      if (p === "/register" && !invitation && !url.searchParams.has("product") && !url.searchParams.has("audience") && !access)
+        destination = "/account?_signup=1";
       const entry = url.searchParams.get("entry");
       const hotspot = entry === pasofiHotspotEntry;
-      if (p === "/register" || (p === "/login" && (url.searchParams.has("audience") || entry !== null))) {
+      if ((p === "/register" && !access && destination !== "/account?_signup=1") ||
+          (p === "/login" && (url.searchParams.has("audience") || entry !== null))) {
         const tier = url.searchParams.get("audience") ?? "user";
         if (!["user", "admin"].includes(tier) || url.searchParams.getAll("audience").length > 1)
-          return page("Choose a registration type", '<a href="/account">Return to Onesa Account</a>', 400);
+          return page("Choose a registration type", '<a href="/account">Return to your account</a>', 400);
         const stored = new URL(hotspot ? "/account" : destination, env.origin);
         stored.searchParams.set("enrollment", tier);
         if (url.searchParams.has("product") || url.searchParams.has("platform") || entry !== null) {
@@ -699,7 +710,7 @@ export function createApp(store, env, client = authClient(env)) {
               url.searchParams.getAll("product").length !== 1 || url.searchParams.getAll("platform").length > 1 ||
               (entry !== null && (url.searchParams.getAll("entry").length !== 1 ||
                 !isRegistrationEntry(product, platform, tier, entry))))
-            return page("Unknown registration entry", '<a href="/account">Continue to Onesa Account</a>', 400);
+            return page("Unknown registration entry", '<a href="/account">Continue to your account</a>', 400);
           if (!returns.has(returnKey(product, platform, tier, entry)) ||
               (hotspot && !connectedProducts.has(product)))
             return page("Product registration unavailable", "The return to your product has not been configured.", 503);
@@ -794,8 +805,8 @@ export function createApp(store, env, client = authClient(env)) {
           new URL(flow.destination, env.origin).searchParams.get("_factor_primary") === "reuse") {
         const retry = new URL(retryPath(flow.destination, env.origin), env.origin);
         retry.searchParams.set("confirm_sign_in", "1");
-        return page("Confirm your Onesa sign-in",
-          '<p>Before you add your first authenticator, Onesa needs to confirm your password once.</p><a class="primary" href="' +
+        return page("Confirm your sign-in",
+          '<p>Before you add your first authenticator, Confirm your password once.</p><a class="primary" href="' +
           esc(retry.pathname + retry.search) + '">Confirm sign-in</a>', 401);
       }
       if (oauthError)
@@ -852,11 +863,14 @@ export function createApp(store, env, client = authClient(env)) {
         return factorVerification(
           "Second factor not verified",
           retryPath(flow.destination, env.origin),
-          "Onesa sign-in did not confirm an authenticator check. Open My account and sign in with the account you want to verify.",
+          "Sign-in did not confirm an authenticator check. Open My account and sign in with the account you want to verify.",
         );
       }
       const product = target.searchParams.get("product");
       const tier = target.searchParams.get("enrollment");
+      const accessRequest = accessEntry(target);
+      const ordinarySignup = target.searchParams.get("_signup") === "1";
+      target.searchParams.delete("_signup");
       const destination = product && tier && returns.get(returnKey(
         product, target.searchParams.get("platform"), tier, target.searchParams.get("entry"),
       ));
@@ -867,12 +881,14 @@ export function createApp(store, env, client = authClient(env)) {
         identity.sub,
         identity.email,
         target.searchParams.get("invite") || "",
-        tier,
+        accessRequest || ordinarySignup ? undefined : tier,
         destination ? product : null,
+        undefined,
+        Boolean(accessRequest) || ordinarySignup,
       );
       target.searchParams.delete("enrollment");
       if (["suspended", "rejected"].includes(user.status))
-        return page("Account access is disabled", "This Onesa account is currently suspended or its access request was declined. Contact your Onesa administrator if you believe this is a mistake.", 403);
+        return page("Account access is disabled", "This account is currently suspended or its access request was declined. Contact your Onesa administrator if you believe this is a mistake.", 403);
       const session = secret(),
         csrf = secret();
       store.run("DELETE FROM sessions WHERE expires<=?", now);
@@ -896,6 +912,43 @@ export function createApp(store, env, client = authClient(env)) {
     }
     const sessionHash = digest(readCookie(req, "session"));
     const session = store.one(sessionLookup, sessionHash, Date.now());
+    if (p === "/access" && ["GET", "POST"].includes(method)) {
+      const entry = accessEntry(url);
+      if (!entry) return page("Access request unavailable", "", 404);
+      const { product, role, path } = entry;
+      const staff = role === "agent";
+      const label = staff ? "staff" : "administrator";
+      const products = requestedProducts(product);
+      const name = product === "intranet" ? intranetName : adminProductName(product);
+      const title = name + " " + label + " access";
+      const next = "?return=" + encodeURIComponent(path);
+      if (!session) return page(title,
+        '<div class="actions"><a class="primary" href="/login' + esc(next) + '">Sign in</a>' +
+        '<a href="/register' + esc(next) + '">Sign up</a></div>', method === "GET" ? 200 : 401);
+      if (method === "POST") {
+        const form = new URLSearchParams(await req.text());
+        if (req.headers.get("origin") !== env.origin || !compare(form.get("csrf"), session.csrf))
+          return page("Reload the access request", '<a href="' + esc(path) + '">Try again</a>', 403);
+        if (staff) store.requestProductStaff(session.id);
+        else store.requestRegistration(session.id, "admin", ...products);
+        return redirect(path);
+      }
+      const productReturn = product === "pasofi" ? "https://pasofi.mobile.onesa.eu/admin"
+        : returns.get(returnKey(products[0], "web", "admin")) ?? "/account";
+      const statuses = staff ? [["pasofi", store.staffRequest(session.id) ??
+        (["agent", "support", "administrator"].includes(store.activeGrant(session.id, "pasofi")?.role) ||
+         store.activeProductAdministrator(session.id, "pasofi") ? "active" : null)]] :
+        products.map(scope => [scope, store.activeProductAdministrator(session.id, scope) ||
+          ["administrator", "owner"].includes(store.activeGrant(session.id, scope)?.role) ? "active" :
+          productAdministratorRequests(store.db, session.id).get(scope)]);
+      const saved = statuses.filter(([, status]) => status && status !== "deleted");
+      return page(title,
+        saved.map(([scope, status]) => "<p>" + (statuses.length > 1 ? esc(adminProductName(scope)) + " · " : "") +
+          esc(accessLabels[status]) + "</p>").join("") +
+        (saved.length < statuses.length ? post(esc(path), session.csrf,
+          '<button class="primary">Request ' + label + ' access</button>') : "") +
+        '<p><a href="' + esc(productReturn) + '">Return to ' + esc(name) + '</a></p>');
+    }
     if (p === "/account/authenticator" && ["GET", "POST"].includes(method)) {
       if (!authenticator || !session || session.state !== "active")
         return page("Sign in to verify your identity", '<a href="/account">Open My account</a>', 403);
@@ -944,16 +997,16 @@ export function createApp(store, env, client = authClient(env)) {
         );
       }
       if (p !== "/admin") {
-        const panels = productPanels(session);
+        const products = productPanels(session);
         const active = session.state === "active";
         return page(
-          "Your Onesa account",
+          "Your account",
           '<div class="account-summary"><div class="actions"><strong><!--email_off-->' +
             esc(session.email) + '<!--/email_off--></strong>' +
             pill(session.state, active ? "Account active" : "Account pending") +
             '</div><p class="muted">Email verified</p>' +
             (active ? "" : '<p class="muted">Your account is awaiting administrator approval.</p>') + '</div>' +
-            '<div class="account-grid">' + panels.accountAccess + '<div class="account-side">' + panels.administratorAccess +
+            '<div class="account-grid">' + products + '<div class="account-side">' +
             '<section class="account-panel" aria-labelledby="account-security"><h2 id="account-security">Account security</h2>' +
             '<p><a href="/verify-factor?return=%2Faccount%23account-security">Set up or verify a second factor</a></p>' +
             (env.connection
@@ -964,14 +1017,14 @@ export function createApp(store, env, client = authClient(env)) {
                 )
               : "<p>Use Forgot password on the sign-in screen to recover your password.</p>") +
             '</section><section class="account-panel" aria-labelledby="account-closure"><h2 id="account-closure">Account closure</h2>' +
-            '<details><summary>Close your Onesa account</summary>' +
+            '<details><summary>Close your account</summary>' +
             '<p>Closure immediately suspends access and starts account and product-data cleanup. Onesa verifies cleanup separately and retains records as required by law.</p>' +
             post("/account/delete", session.csrf,
               '<div class="actions"><label>Type DELETE to confirm<input name="confirm" required autocomplete="off" spellcheck="false"></label>' +
               '<button>Request account closure</button></div>') +
             '</details></section></div></div><div class="account-footer">' +
             post("/logout", session.csrf, env.auth0LogoutEnabled ? "<button>Sign out</button>" : "<button>Sign out here</button>") + '</div>',
-          200, true, store.activeGrant(session.id, "identity")?.role === "administrator",
+          200, true, ["identity", platformGrant].some(product => store.activeGrant(session.id, product)?.role === "administrator"),
         );
       }
     }
@@ -983,10 +1036,10 @@ export function createApp(store, env, client = authClient(env)) {
       const back = "/account" + section;
       const accountAction = p.startsWith("/account/") || p === "/logout";
       if (!session && accountAction)
-        return page("Sign in to continue", '<p>Your Onesa Account session has ended.</p><a class="primary" href="/login?return=' +
+        return page("Sign in to continue", '<p>Your session has ended.</p><a class="primary" href="/login?return=' +
           encodeURIComponent(back) + '">Sign in again</a>', 401);
       const formDenied = () => accountAction
-        ? page("Reload your Onesa account", '<p>Onesa could not verify this form. Open your account and submit the request again.</p>' +
+        ? page("Reload your account", '<p>This form could not be verified. Open your account and submit the request again.</p>' +
           '<a class="primary" href="' + back + '">Return to your account</a>', 403)
         : new Response(null, { status: 403 });
       if (!session || req.headers.get("origin") !== env.origin) return formDenied();
@@ -1018,7 +1071,7 @@ export function createApp(store, env, client = authClient(env)) {
             '<a href="/verify-factor?return=%2Faccount%23account-closure">Verify a second factor</a>', 403);
         store.requestDeletion(session.id);
         const result = page("Account closure requested",
-          "<p>Your Onesa account access has been suspended. Your request is recorded for credential-provider and product-data cleanup. Some records may be retained where required by law. The request is not yet confirmation of complete erasure.</p>");
+          "<p>Your account access has been suspended. Your request is recorded for credential-provider and product-data cleanup. Some records may be retained where required by law. The request is not yet confirmation of complete erasure.</p>");
         result.headers.append("set-cookie", cookie("session", "", 0));
         result.headers.append("set-cookie", cookie("registration", "", 0));
         return result;
@@ -1102,8 +1155,11 @@ export function createApp(store, env, client = authClient(env)) {
       scopedGrant && ["administrator", "owner"].includes(scopedGrant.role) ||
       session && scopeProduct && store.activeProductAdministrator(session.id, scopeProduct),
     );
-    if (!session || (scopeProduct ? !(globalAdministrator || canManageProduct) : !globalAdministrator))
-      return page("Identity administrator required", "", 403);
+    if (!session || (scopeProduct ? !(globalAdministrator || canManageProduct) : !globalAdministrator)) {
+      const request = method === "GET" && requestedProducts(scopeProduct).length
+        ? '<a class="primary" href="' + esc(accessPath(scopeProduct, "administrator")) + '">Request administrator access</a>' : "";
+      return page(scopeProduct ? "Administrator access required" : "Identity administrator required", request, 403);
+    }
     if (!freshFactor(session.mfa_at, Date.now()))
       return factorVerification(
         "Verify your identity",
@@ -1147,17 +1203,33 @@ export function createApp(store, env, client = authClient(env)) {
               '<div class="admin-actions"><button name="status" value="active">Approve administrator access</button>' +
               '<button name="status" value="rejected">Decline request</button>' + deleteRequestButton +
               '</div>')) + "</li>").join("");
+        const staff = scopeProduct === "pasofi" ? store.all(`SELECT a.id,a.email,a.revision,
+          json_extract(e.detail,'$.status') AS status FROM accounts a JOIN audit e ON e.seq=(
+            SELECT seq FROM audit WHERE target=a.id AND action='product-staff-request' ORDER BY seq DESC LIMIT 1
+          ) WHERE a.status IN ('active','pending') AND json_extract(e.detail,'$.status') IN ('pending','active')
+          ORDER BY status DESC,a.email`) : [];
+        const staffReviews = staff.map(user => '<li class="admin-row"><div class="admin-identity"><strong>' +
+          adminEmail(user.email) + '</strong>' + pill(user.status, accessLabels[user.status]) + '</div>' +
+          (session.id === user.id ? '<span>Another administrator must review this request.</span>' :
+            post("/admin/change", session.csrf, hidden("kind", "product-staff-review") +
+              hidden("product", scopeProduct) + hidden("id", user.id) + hidden("revision", user.revision) +
+              '<div class="admin-actions">' + (user.status === "active"
+                ? '<button name="status" value="revoked">Remove staff access</button>'
+                : '<button name="status" value="active">Approve staff access</button>' +
+                  '<button name="status" value="rejected">Decline request</button>' + deleteRequestButton) + '</div>')) + "</li>").join("");
         return page(
           productName + " administrators",
           '<div class="identity-admin">' +
             (globalAdministrator ? '<a href="/admin">Identity administration</a>' : "") +
             (reviews ? '<section><h2>Pending administrator requests</h2><ul class="admin-list">' + reviews + "</ul></section>" : "") +
+            (scopeProduct === "pasofi" ? '<section><h2>Staff access</h2>' + (staffReviews
+              ? '<ul class="admin-list">' + staffReviews + '</ul>' : '<p>No staff requests.</p>') + '</section>' : "") +
             '<section><h2>Current administrators</h2>' +
             (list ? '<ul class="admin-list">' + list + "</ul>" : "<p>No administrators assigned.</p>") + "</section>" +
             '<details class="admin-panel admin-form"><summary>Add an administrator</summary><div class="admin-panel-body">' +
             post("/admin/change", session.csrf,
               hidden("kind", "product-administrator") + hidden("product", scopeProduct) + hidden("status", "active") +
-              '<label>Verified Onesa account email<input type="email" name="email" required autocomplete="off"></label>' +
+              '<label>Verified account email<input type="email" name="email" required autocomplete="off"></label>' +
               '<button class="primary">Add administrator</button>') + "</div></details></div>",
           200, true, globalAdministrator,
         );
@@ -1183,9 +1255,10 @@ export function createApp(store, env, client = authClient(env)) {
         const registrationsByTier = [...registrations(store.db, user.id)];
         const administratorRequests = [...productAdministratorRequests(store.db, user.id)]
           .filter(([, status]) => status === "pending");
+        const staffPending = store.staffRequest(user.id) === "pending";
         const accessRequests = grants.filter(grant =>
           grant.status === "pending" && accountProducts.get(grant.product)?.role === grant.role);
-        const reviewCount = accessRequests.length + administratorRequests.length +
+        const reviewCount = accessRequests.length + administratorRequests.length + Number(staffPending) +
           (session.id === user.id ? 0 : registrationsByTier.filter(([, status]) => status === "pending").length);
         const registrationRows = registrationsByTier.map(([tier, status]) => {
           const title = tier === "admin" ? "Shared administrator registration" : "Shared user registration";
@@ -1206,7 +1279,7 @@ export function createApp(store, env, client = authClient(env)) {
         )).join("") + administratorRequests.map(([product]) =>
           '<p class="admin-row"><a href="/admin?product=' + esc(product) + '">Review ' +
           esc(adminProductName(product)) + " administrator request</a></p>",
-        ).join("");
+        ).join("") + (staffPending ? '<p class="admin-row"><a href="/admin?product=pasofi">Review PasoFi staff request</a></p>' : "");
         const grantRows = grants.map(grant =>
           '<li class="admin-row"><div class="admin-identity"><strong>' +
           esc(grant.product === platformGrant ? "Platform access" : adminProductName(grant.product)) +
@@ -1280,9 +1353,10 @@ export function createApp(store, env, client = authClient(env)) {
     }
     if (p === "/admin/change" && method === "POST") {
       const scope = scopeProduct;
-      if (form.get("kind") === "product-administrator-review" && scope) {
+      const kind = form.get("kind");
+      if (["product-administrator-review", "product-staff-review"].includes(kind) && scope) {
         store.change(session.id, form.get("id"), Number(form.get("revision")), {
-          kind: "product-administrator-review",
+          kind,
           product: scope,
           status: form.get("status"),
         }, scope);
@@ -1300,7 +1374,7 @@ export function createApp(store, env, client = authClient(env)) {
             email,
           );
           if (!target)
-            throw new Rejected("Register and verify this address with Onesa first, then activate the account before granting administrator access.");
+            throw new Rejected("Register and verify this address first, then activate the account before granting administrator access.");
           targetId = target.id;
           targetRevision = target.revision;
         }
