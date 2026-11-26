@@ -21,12 +21,14 @@ function tenant(initialTheme) {
 
 test("installs a new default theme and verifies both login flow types in both languages", async () => {
   const t = tenant(null);
-  assert.equal((await syncBranding(t.request)).length, 9);
+  assert.equal((await syncBranding(t.request)).length, 13);
   assert.deepEqual(t.writes, []);
   await syncBranding(t.request, true);
   assert.deepEqual(t.writes[0], ["POST", "/branding/themes"]);
   assert.equal(t.prompts.get("/prompts/signup-id/custom-text/de")["signup-id"].title, "Konto erstellen");
   assert.deepEqual(await syncBranding(t.request), []);
+  assert.equal(t.prompts.get("/prompts/login-id/custom-text/en")["login-id"].description, "Enter your email to continue.");
+  assert.equal(t.prompts.get("/prompts/signup-password/custom-text/en")["signup-password"].title, "Choose a password");
   const count = t.writes.length;
   await syncBranding(t.request, true);
   assert.equal(t.writes.length, count);
