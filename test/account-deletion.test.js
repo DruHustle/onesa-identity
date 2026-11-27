@@ -89,7 +89,7 @@ test("account closure is MFA and CSRF protected, revokes sessions/grants and que
   assert.equal(f.store.one("SELECT count(*) AS n FROM audit WHERE action='request-account-deletion' AND target=?", f.account.id).n, 1);
   assert.equal(f.store.verifyAuditChain().entries > 0, true);
   assert.equal((await f.call("/account", "GET", undefined, { cookie: f.cookie })).status, 200);
-  assert.match(await (await f.call("/account", "GET", undefined, { cookie: f.cookie })).text(), /Sign in to Onesa/);
+  assert.match(await (await f.call("/account", "GET", undefined, { cookie: f.cookie })).text(), /<h1>Sign in<\/h1>/);
   const denied = await f.call("/internal/decision", "POST",
     JSON.stringify({ subject: "oidc|closure-member", audience: "https://api.farmer.onesa.test", client: "farmer-web" }),
     { authorization: "Bearer isolated-test-policy-key", "content-type": "application/json" });

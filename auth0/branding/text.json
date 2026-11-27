@@ -1,26 +1,62 @@
 {
   "en": {
     "login": {
-      "title": "Sign in to Onesa",
-      "description": "Sign in once with your Onesa account to access ${clientName}.",
-      "signupActionLinkText": "Create an Onesa account"
+      "title": "Sign in",
+      "description": "Enter your email and password.",
+      "signupActionLinkText": "Sign up"
     },
     "signup": {
-      "title": "Create an Onesa account",
-      "description": "Create one Onesa account to request access to ${clientName}.",
-      "loginActionLinkText": "Sign in to Onesa"
+      "title": "Sign up",
+      "description": "Enter your email and choose a password.",
+      "loginActionLinkText": "Sign in"
+    },
+    "login-id": {
+      "title": "Sign in",
+      "description": "Enter your email to continue.",
+      "signupActionLinkText": "Sign up"
+    },
+    "login-password": {
+      "title": "Sign in",
+      "description": "Enter your password to continue."
+    },
+    "signup-id": {
+      "title": "Sign up",
+      "description": "Enter your email to get started.",
+      "loginActionLinkText": "Sign in"
+    },
+    "signup-password": {
+      "title": "Choose a password",
+      "description": "Choose a password to finish signing up."
     }
   },
   "de": {
     "login": {
-      "title": "Bei Onesa anmelden",
-      "description": "Melden Sie sich einmal mit Ihrem Onesa-Konto an, um ${clientName} zu öffnen.",
-      "signupActionLinkText": "Onesa-Konto erstellen"
+      "title": "Anmelden",
+      "description": "Gib deine E-Mail-Adresse und dein Passwort ein.",
+      "signupActionLinkText": "Konto erstellen"
     },
     "signup": {
-      "title": "Onesa-Konto erstellen",
-      "description": "Erstellen Sie ein Onesa-Konto, um Zugriff auf ${clientName} zu beantragen.",
-      "loginActionLinkText": "Bei Onesa anmelden"
+      "title": "Konto erstellen",
+      "description": "Gib deine E-Mail-Adresse ein und wähle ein Passwort.",
+      "loginActionLinkText": "Anmelden"
+    },
+    "login-id": {
+      "title": "Anmelden",
+      "description": "Gib deine E-Mail-Adresse ein.",
+      "signupActionLinkText": "Konto erstellen"
+    },
+    "login-password": {
+      "title": "Anmelden",
+      "description": "Gib dein Passwort ein."
+    },
+    "signup-id": {
+      "title": "Konto erstellen",
+      "description": "Gib deine E-Mail-Adresse ein.",
+      "loginActionLinkText": "Anmelden"
+    },
+    "signup-password": {
+      "title": "Passwort wählen",
+      "description": "Wähle ein Passwort für dein Konto."
     }
   }
 }

@@ -35,7 +35,7 @@ function values(input) {
   return typeof input === "string" ? input.split(/\s+/) : [];
 }
 
-async function needsSharedMfa(event) {
+async function needsSharedMfa(event, customerEntry) {
   const { POLICY_URL, POLICY_ORIGIN, POLICY_KEY } = event.secrets || {};
   const audience = infrastructureAudience(event);
   if (!audience.audience || !event.user?.email_verified ||
@@ -67,6 +67,7 @@ async function needsSharedMfa(event) {
       throw Error("Infrastructure administrator grant required");
     return true; // An explicit admin grant still requires a fresh second factor.
   }
+  if (customerEntry && decision.product === "pasofi") return false;
   return decision.require_mfa === true;
 }
 
@@ -76,7 +77,9 @@ exports.onExecutePostLogin = async (event, api) => {
   const operation = requested.includes(operationAcr);
   if (transaction.protocol === "oauth2-refresh-token") return;
   if (!operation && !requested.includes(mfaAcr)) {
-    try { if (!await needsSharedMfa(event)) return; }
+    const customerEntry = transaction.protocol === "oidc-basic-profile" &&
+      requested.length === 1 && requested[0] === "urn:onesa:authentication:pasofi-customer";
+    try { if (!await needsSharedMfa(event, customerEntry)) return; }
     catch { return api.access.deny("Onesa access is temporarily unavailable."); }
   }
 

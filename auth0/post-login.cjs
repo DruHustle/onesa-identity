@@ -105,6 +105,16 @@ async function applyPolicy(event, api, continuing = false) {
     resourceAudience = audience.audience;
     infrastructure = audience.infrastructure;
     portainer = audience.portainer === true;
+    const enrollment = !continuing && !infrastructure &&
+      event.transaction?.protocol === "oidc-basic-profile" &&
+      typeof event.transaction.redirect_uri === "string" && typeof event.user.email === "string"
+      ? {
+          verified: true,
+          protocol: event.transaction.protocol,
+          redirectUri: event.transaction.redirect_uri,
+          email: event.user.email,
+        }
+      : undefined;
     const result = await fetch(url, {
       method: "POST",
       redirect: "error",
@@ -117,6 +127,7 @@ async function applyPolicy(event, api, continuing = false) {
         subject: event.user.user_id,
         audience: audience.audience,
         client: event.client.client_id,
+        enrollment,
       }),
     });
     if (!result.ok) return deny();
@@ -132,19 +143,41 @@ async function applyPolicy(event, api, continuing = false) {
     decision.roles.length !== 1 ||
     !["administrator", "owner"].includes(decision.roles[0])
   )) return deny();
+  const transaction = event.transaction || {};
+  const requested = Array.isArray(transaction.acr_values)
+    ? transaction.acr_values
+    : String(transaction.acr_values || "").split(/\s+/).filter(Boolean);
+  if (decision.product === "pasofi" && requested.includes("urn:onesa:authentication:pasofi-customer") &&
+      transaction.protocol !== "oauth2-refresh-token") {
+    // A customer transaction can only lose privileges. The staff entry
+    // still requires its own authorization and fresh authenticator proof.
+    const roles = decision.roles;
+    const customer = Array.isArray(roles) && (roles.length === 1 &&
+      ["customer", "admin", "administrator"].includes(roles[0]) ||
+      roles.length === 2 && roles.includes("customer") && roles.includes("agent"));
+    if (continuing || requested.length !== 1 || transaction.protocol !== "oidc-basic-profile" ||
+        !decision.user_id || !customer) return deny();
+    api.accessToken.setCustomClaim(ns + "user_id", decision.user_id);
+    api.accessToken.setCustomClaim(ns + "products", ["pasofi"]);
+    api.accessToken.setCustomClaim(ns + "roles", ["customer"]);
+    return;
+  }
   // Token issuance time is not evidence of a fresh factor.
   const observed = (event.authentication?.methods || [])
     .filter((m) => m.name === "mfa")
     .map((m) => Date.parse(m.timestamp))
     .filter(Number.isFinite);
   const latest = observed.length ? Math.max(...observed) : 0;
-  const pasoFiRenewal = decision.product === "pasofi" && event.transaction?.protocol === "oauth2-refresh-token";
+  const pasoFiRenewal = decision.product === "pasofi" && decision.platform_administrator !== true &&
+    event.transaction?.protocol === "oauth2-refresh-token";
   let mfaTime = !pasoFiRenewal && latest > 0 && latest <= Date.now() ? Math.floor(latest / 1000) : 0;
   const now = Math.floor(Date.now() / 1000);
-  const localPasoFiFactor = decision.product === "pasofi" && decision.require_mfa === true &&
+  const localProductFactor = (decision.product === "pasofi" || decision.platform_administrator === true) &&
+    decision.require_mfa === true &&
     event.transaction?.protocol === "oidc-basic-profile";
-  if (continuing || (localPasoFiFactor && (!mfaTime || now - mfaTime >= 300))) {
-    if (!localPasoFiFactor || !continuing && !api.redirect?.canRedirect()) return deny();
+  if (continuing || (localProductFactor &&
+      (decision.platform_administrator === true || !mfaTime || now - mfaTime >= 300))) {
+    if (!localProductFactor || !continuing && !api.redirect?.canRedirect()) return deny();
     const body = { subject: event.user.user_id, clientId: event.client.client_id, audience: resourceAudience };
     const phase = continuing ? "finish" : "start";
     if (continuing) {
@@ -179,10 +212,6 @@ async function applyPolicy(event, api, continuing = false) {
   if (!pasoFiRenewal && (decision.require_mfa === true || infrastructure) &&
       (!mfaTime || mfaTime > Math.floor(Date.now() / 1000) ||
        Math.floor(Date.now() / 1000) - mfaTime > 300)) return deny();
-  const transaction = event.transaction || {};
-  const requested = Array.isArray(transaction.acr_values)
-    ? transaction.acr_values
-    : String(transaction.acr_values || "").split(/\s+/);
   const operation = transaction.protocol !== "oauth2-refresh-token" &&
     requested.includes("urn:onesa:authentication:operation-mfa");
   if (operation) {
@@ -208,6 +237,9 @@ async function applyPolicy(event, api, continuing = false) {
     api.idToken.setCustomClaim(ns + "infrastructure_admin", "approved");
   }
   if (mfaTime) api.accessToken.setCustomClaim(ns + "mfa_time", mfaTime);
+  if (decision.platform_administrator === true && decision.require_mfa === true && mfaTime &&
+      decision.roles.length === 1 && decision.roles[0] === "administrator")
+    api.accessToken.setCustomClaim(ns + "platform_administrator", true);
   if (decision.portal_staff_registration === true && decision.product === "portal" &&
       decision.require_mfa === true && decision.roles.length === 1 && decision.roles[0] === "administrator")
     api.accessToken.setCustomClaim(ns + "portal_staff_registration", true);
