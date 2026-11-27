@@ -26,14 +26,6 @@ function infrastructureAudience(event) {
 }
 
 async function verificationDenial(event, policyOrigin, policyKey) {
-  if (!event.secrets.ACCOUNT_CLIENT_ID ||
-      event.client?.client_id !== event.secrets.ACCOUNT_CLIENT_ID ||
-      event.client.client_id === event.secrets.INFRASTRUCTURE_SSO_CLIENT_ID ||
-      event.client.client_id === event.secrets.PORTAINER_SSO_CLIENT_ID ||
-      event.resource_server?.identifier ||
-      event.transaction?.protocol !== "oidc-basic-profile")
-    return "Onesa access is unavailable for this application.";
-
   const subject = event.user?.user_id;
   const query = event.request?.query;
   const now = Date.now();
@@ -41,6 +33,23 @@ async function verificationDenial(event, policyOrigin, policyKey) {
     const timestamp = Date.parse(method.timestamp);
     return method.name === "pwd" && timestamp <= now && now - timestamp <= 300000;
   });
+  const infrastructure = event.client?.client_id === event.secrets.INFRASTRUCTURE_SSO_CLIENT_ID ||
+    event.client?.client_id === event.secrets.PORTAINER_SSO_CLIENT_ID;
+  if (!event.secrets.ACCOUNT_CLIENT_ID ||
+      event.client?.client_id !== event.secrets.ACCOUNT_CLIENT_ID ||
+      infrastructure ||
+      event.resource_server?.identifier ||
+      event.transaction?.protocol !== "oidc-basic-profile") {
+    // A person who has just entered their own password in a product sign-in
+    // (often straight after signing up) is told what is missing. The product
+    // shows its own "verify your email" guidance; no email is sent from here.
+    if (!infrastructure && freshPassword && event.connection?.strategy === "auth0" &&
+        event.transaction?.protocol === "oidc-basic-profile" &&
+        typeof subject === "string" && /^auth0\|[A-Za-z0-9_-]{1,128}$/.test(subject))
+      return "Onesa email verification is required.";
+    return "Onesa access is unavailable for this application.";
+  }
+
   if (event.connection?.strategy !== "auth0" || !freshPassword ||
       query?.onesa_email_verification !== "resend" || !event.transaction.prompt?.includes("login") ||
       (query.max_age !== "0" && query.max_age !== 0) ||
