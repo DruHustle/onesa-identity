@@ -2103,6 +2103,35 @@ test("the unverified Auth0 Action only requests email after a fresh password che
   assert.equal(denied.at(-1), "Onesa email verification request accepted.");
 });
 
+test("a product sign-in by an unverified password account is told to verify its email", async (t) => {
+  const network = t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 500 }));
+  const denied = [];
+  const api = { access: { deny: message => denied.push(message) } };
+  const secrets = { ACCOUNT_CLIENT_ID: env.clientId, INFRASTRUCTURE_SSO_CLIENT_ID: "infrastructure-access",
+    POLICY_ORIGIN: env.origin, POLICY_URL: env.origin + "/internal/decision", POLICY_KEY: env.policyKey };
+  const event = {
+    client: { client_id: "pasofi-web" },
+    resource_server: { identifier: "https://api.pasofi.mobile.onesa.eu" },
+    user: { user_id: "auth0|new-customer", email_verified: false },
+    connection: { strategy: "auth0" },
+    authentication: { methods: [{ name: "pwd", timestamp: new Date().toISOString() }] },
+    transaction: { protocol: "oidc-basic-profile" },
+    request: { query: {} },
+    secrets,
+  };
+  await action.onExecutePostLogin(event, api);
+  assert.deepEqual(denied, ["Onesa email verification is required."]);
+  for (const override of [
+    { client: { client_id: "infrastructure-access" } },
+    { authentication: { methods: [] } },
+    { authentication: { methods: [{ name: "pwd", timestamp: new Date(Date.now() - 600000).toISOString() }] } },
+    { connection: { strategy: "google-oauth2" }, user: { user_id: "google-oauth2|123", email_verified: false } },
+    { transaction: { protocol: "oauth2-refresh-token" } },
+  ]) await action.onExecutePostLogin({ ...event, ...override }, api);
+  assert.deepEqual(denied.slice(1), Array(5).fill("Onesa access is unavailable for this application."));
+  assert.equal(network.mock.callCount(), 0, "a product sign-in never triggers the Account email job");
+});
+
 test("password recovery reports provider timeout as 503 without success audit", async (t) => {
   const { store, call, login } = await fixture(t, {
     connection: "Username-Password-Authentication",
