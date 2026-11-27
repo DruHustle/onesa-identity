@@ -18,8 +18,10 @@ import {
   rollbackDelta,
 } from "../migration/reconcile.js";
 import action from "../auth0/post-login.cjs";
+import signupAction from "../auth0/pre-registration.cjs";
 import { applyProofs } from "../migration/link-proof.js";
 import { bootstrapIdentityAdmin } from "../migration/identity-admin.js";
+import { bootstrapPlatformAdministrators } from "../migration/platform-admin.js";
 test("audit chain upgrades legacy rows, blocks mutation and detects tampering", () => {
   const directory = mkdtempSync(join(tmpdir(), "onesa-audit-"));
   const file = join(directory, "identity.sqlite");
@@ -218,6 +220,12 @@ test("Oracle staging requires a separate issuer, Account host, data store and da
   }
   assert.throws(() => configuration({...stage, AUTH0_VERIFICATION_ORIGIN: "https://onesa.eu.auth0.com",
     AUTH0_VERIFICATION_CLIENT_ID: "stage-verification"}), /separate email verification tenant/);
+  assert.throws(() => configuration({ ...stage, RESOURCE_CLIENTS_JSON: JSON.stringify({
+    "https://pasofi-api.staging.test": {
+      product: "pasofi", clients: ["stage-web"],
+      enrollmentCallbacks: [{client:"stage-web", redirectUri:"https://pasofi.mobile.onesa.eu/onesa-callback.html"}],
+    },
+  }) }), /Invalid application enrollment registry/);
 });
 
 async function fixture(t, overrides = {}) {
@@ -275,14 +283,186 @@ async function fixture(t, overrides = {}) {
   });
   return { store, call, login, admin, setRedeem: (next) => { redeem = next ?? defaultRedeem; } };
 }
+
+test("shared clients enroll from an exact verified product callback and check grants on every refresh", async (t) => {
+  const pasoFi = "https://pasofi-api.example.test";
+  const farmer = "https://farmer-api.example.test";
+  const documents = "https://internal-api.example.test";
+  const web = "shared-web";
+  const native = "shared-native";
+  const pasoFiWeb = "https://pasofi.example.test/callback";
+  const pasoFiNative = "https://app.pasofi.example.test/ios/callback";
+  const farmerWeb = "https://farmer.example.test/callback";
+  const docsWeb = "https://docs.example.test/callback";
+  const catalog = {
+    [pasoFi]: { product: "pasofi", clients: [web, native], enrollmentCallbacks: [
+      { client: web, redirectUri: pasoFiWeb }, { client: native, redirectUri: pasoFiNative },
+    ] },
+    [farmer]: { product: "farmer", clients: [web], enrollmentCallbacks: [{ client: web, redirectUri: farmerWeb }] },
+    [documents]: { product: "internal-documents", clients: [web] },
+  };
+  const config = resourceCatalog => configuration({
+    OIDC_ISSUER: env.issuer, IDENTITY_ORIGIN: env.origin, OIDC_CLIENT_ID: env.clientId,
+    OIDC_CLIENT_SECRET: "test-client-secret", ACTION_POLICY_KEY: env.policyKey.padEnd(32, "x"),
+    RESOURCE_CLIENTS_JSON: JSON.stringify(resourceCatalog),
+  });
+  for (const [audience, change] of [
+    [pasoFi, [{ client: web, redirectUri: farmerWeb }]],
+    [pasoFi, [{ client: web, redirectUri: pasoFiWeb + "?extra=1" }]],
+    [pasoFi, [{ client: "unbound-client", redirectUri: pasoFiWeb }]],
+    [pasoFi, [{ client: env.clientId, redirectUri: env.origin + "/callback" }]],
+    [documents, [{ client: web, redirectUri: docsWeb }]],
+  ]) {
+    assert.throws(() => config({ ...catalog, [audience]: {
+      ...catalog[audience], enrollmentCallbacks: change,
+    } }), /Invalid application enrollment registry/);
+  }
+  const { resources, policyKey } = config(catalog);
+  const { store, call, admin } = await fixture(t, { resources, policyKey });
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    assert.equal(new URL(url).origin, env.origin);
+    assert.equal(options.redirect, "error");
+    return call(new URL(url).pathname, options.method, options.body, options.headers);
+  });
+  const log = t.mock.method(console, "log", () => {});
+  const secrets = {
+    POLICY_ORIGIN: env.origin, POLICY_URL: env.origin + "/internal/decision", POLICY_KEY: policyKey,
+    ACCOUNT_CLIENT_ID: env.clientId,
+  };
+  const transaction = { protocol: "oidc-basic-profile", redirect_uri: pasoFiWeb, response_type: ["code"] };
+  for (const [client, redirectUri, allowed] of [
+    [undefined, pasoFiWeb, true],
+    [web, pasoFiWeb, true],
+    [native, pasoFiNative, true],
+    [native, pasoFiWeb, false],
+    [web, docsWeb, false],
+    [web, pasoFiWeb + "?extra=1", false],
+  ]) {
+    const denied = [];
+    await signupAction.onExecutePreUserRegistration({
+      secrets,
+      client: client ? { client_id: client } : undefined,
+      transaction: { ...transaction, redirect_uri: redirectUri },
+    }, { access: { deny: reason => denied.push(reason) } });
+    assert.equal(!denied.length, allowed);
+  }
+  assert.equal(log.mock.callCount(), 3);
+
+  const subject = "auth0|pasofi-shared-fixture";
+  const email = "new-from-product@example.test";
+  async function issue(overrides = {}) {
+    const claims = {};
+    const denied = [];
+    const event = {
+      secrets, transaction, user: { user_id: subject, email, email_verified: true },
+      resource_server: { identifier: pasoFi }, client: { client_id: web },
+      ...overrides,
+    };
+    await action.onExecutePostLogin(event, {
+      access: { deny: reason => denied.push(reason) },
+      accessToken: { setCustomClaim: (key, value) => { claims[key.replace("https://onesa.eu/claims/", "")] = value; } },
+    });
+    return { claims, denied };
+  }
+  const refresh = { protocol: "oauth2-refresh-token", redirect_uri: pasoFiWeb };
+  for (const event of [
+    { user: { user_id: subject, email, email_verified: false } },
+    { transaction: refresh },
+    { resource_server: { identifier: farmer } },
+    { resource_server: { identifier: documents }, transaction: { ...transaction, redirect_uri: docsWeb } },
+    { client: { client_id: native } },
+  ]) {
+    assert.equal((await issue(event)).denied.length, 1);
+    assert.equal(store.lookup(env.issuer, subject), undefined);
+  }
+  const first = await issue();
+  assert.deepEqual(first.denied, []);
+  assert.deepEqual(first.claims, { user_id: first.claims.user_id, products: ["pasofi"], roles: ["customer"] });
+  const account = store.lookup(env.issuer, subject);
+  assert.equal(account.id, first.claims.user_id);
+  assert.deepEqual((await issue({ transaction: refresh })).claims, first.claims);
+  assert.equal((await issue({ transaction: refresh, resource_server: { identifier: farmer } })).denied.length, 1);
+  assert.equal((await issue({ user: { user_id: "auth0|duplicate", email, email_verified: true } })).denied.length, 1);
+  const rows = store.all("SELECT detail FROM audit WHERE action='verified-product-enrollment' AND target=?", account.id);
+  assert.deepEqual(rows.map(row => JSON.parse(row.detail)), [
+    { product: "pasofi", role: "customer", status: "active", client: web, subject },
+  ]);
+  const farmerEntry = await issue({ resource_server: { identifier: farmer },
+    transaction: { ...transaction, redirect_uri: farmerWeb } });
+  assert.deepEqual(farmerEntry.claims, { user_id: account.id, products: ["farmer"], roles: ["user"] });
+  store.change("reviewer", account.id, store.lookup(env.issuer, subject).revision,
+    { kind: "grant", product: "pasofi", role: "customer", status: "revoked" });
+  assert.equal((await issue({ transaction: refresh })).denied.length, 1);
+  assert.equal((await issue()).denied.length, 1);
+  assert.equal(store.activeGrant(account.id, "pasofi"), undefined);
+  assert.deepEqual((await issue({ transaction: refresh, resource_server: { identifier: farmer } })).claims,
+    farmerEntry.claims);
+  const formerSubject = "auth0|legacy-ordinary-fixture";
+  const formerEmail = "legacy-ordinary@example.test";
+  const former = store.register(env.issuer, formerSubject, formerEmail, "", "user");
+  store.change(admin.id, former.id, former.revision, { kind: "status", status: "active" });
+  store.change(admin.id, former.id, store.lookup(env.issuer, formerSubject).revision,
+    { kind: "registration", tier: "user", status: "active" });
+  store.change(admin.id, former.id, store.lookup(env.issuer, formerSubject).revision,
+    { kind: "registration", tier: "user", status: "revoked" });
+  assert.equal((await issue({ user: { user_id: formerSubject, email: formerEmail, email_verified: true } })).denied.length, 1);
+  assert.equal(store.activeGrant(former.id, "pasofi"), undefined);
+});
+test("platform administrators are appointed independently with a fresh factor and can lose all-product authority", async (t) => {
+  const audience = "https://farmer-api.example.test";
+  const resources = new Map([[audience, {product:"farmer", clients:["shared-web"], platformAdmin:true}]]);
+  const { store, call, login, admin } = await fixture(t, {resources});
+  function active(name, administrator = false) {
+    const user = store.register(env.issuer, "oidc|" + name, name + "@example.test");
+    store.change(admin.id, user.id, user.revision, {kind:"status", status:"active"});
+    if (administrator) store.change(admin.id, user.id, user.revision + 1,
+      {kind:"grant", product:"identity", role:"administrator", status:"active"});
+    return user.id;
+  }
+  const second = active("platform-second", true);
+  const priorIdentityAdmin = active("identity-only", true);
+  const candidate = active("platform-candidate");
+  assert.throws(() => bootstrapPlatformAdministrators(store, env.issuer, [admin.id,candidate], "fixture"),
+    /Both initial administrators/);
+  assert.equal(store.activeGrant(admin.id, "platform"), undefined);
+  bootstrapPlatformAdministrators(store, env.issuer, [admin.id,second], "fixture");
+  assert.throws(() => bootstrapPlatformAdministrators(store, env.issuer, [admin.id,second], "fixture"),
+    /already exists/);
+
+  async function change(session, id, status) {
+    const html = await (await call("/admin", "GET", undefined, {cookie:session.cookie})).text();
+    const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1] ?? "unavailable";
+    return call("/admin/change","POST",new URLSearchParams({
+      csrf,id,status,kind:"platform-administrator",
+      revision:store.one("SELECT revision FROM accounts WHERE id=?",id).revision,
+    }),{cookie:session.cookie,origin:env.origin});
+  }
+  const legacy = await login("identity-only");
+  assert.equal((await change(legacy,candidate,"active")).status,409);
+  const expired = await login("platform-second","/admin",Date.now()-600000);
+  assert.notEqual((await change(expired,candidate,"active")).status,303);
+  const platform = await login("platform-second");
+  assert.equal((await change(platform,second,"revoked")).status,409);
+  assert.equal((await change(platform,candidate,"active")).status,303);
+  const decision = () => call("/internal/decision","POST",JSON.stringify({
+    subject:"oidc|platform-candidate", audience,client:"shared-web",
+  }),{authorization:"Bearer "+env.policyKey});
+  assert.deepEqual(await (await decision()).json(), {
+    user_id:candidate,product:"farmer",roles:["administrator"],platform_administrator:true,require_mfa:true,
+  });
+  assert.equal((await change(platform,candidate,"revoked")).status,303);
+  assert.equal((await decision()).status,403);
+  assert.equal(store.all("SELECT seq FROM audit WHERE target=? AND action='grant'",candidate).length,2);
+});
+
 test("the Onesa Account entry preserves invitations for sign-in and registration", async (t) => {
   const { call, store } = await fixture(t);
   const invitation = store.invite("identity-admin", "invitee@onesa.test");
   const account = await call("/account?invite=" + invitation);
   const html = await account.text();
-  assert.match(html, /<h1>Sign in to Onesa<\/h1>/);
+  assert.match(html, /<h1>Sign in<\/h1>/);
   assert.ok(html.includes('href="/login?invite=' + invitation + '"'));
-  assert.ok(html.includes('href="/register?invite=' + invitation + '">Create an Onesa account'));
+  assert.ok(html.includes('href="/register?invite=' + invitation + '">Create account'));
   assert.doesNotMatch(html, /type="password"/);
   for (const [path, hint] of [["/login", null], ["/register", "signup"]]) {
     const start = await call(path + "?invite=" + invitation);
@@ -295,7 +475,7 @@ test("the Onesa Account entry preserves invitations for sign-in and registration
   }
 });
 
-test("the public Account overview returns a signed-in visitor to the selected feature", async (t) => {
+test("the signed-out Account page is focused and existing feature returns still work", async (t) => {
   const { call, login } = await fixture(t);
   for (const path of ["/", "/account"]) {
     const overview = await call(path);
@@ -303,11 +483,13 @@ test("the public Account overview returns a signed-in visitor to the selected fe
     assert.equal(overview.status, 200);
     assert.equal(overview.headers.get("cache-control"), "no-store");
     assert.equal(overview.headers.has("set-cookie"), false);
-    assert.match(html, /Onesa Intranet.*Smart Farmer.*PasoFi/);
+    assert.match(html, /<h1>Sign in<\/h1>/);
+    assert.match(html, /href="\/login">Sign in<\/a>/);
+    assert.match(html, /href="\/register">Create account<\/a>/);
+    assert.doesNotMatch(html, /Product access|Account security|Request administrator access|Smart Farmer/);
     assert.doesNotMatch(html, /<form|identity-admin@onesa\.test/);
     for (const section of ["product-access", "account-security"]) {
       const returnPath = "/account#" + section;
-      assert.ok(html.includes('href="/login?return=' + encodeURIComponent(returnPath) + '"'));
       const member = await login("overview-member", returnPath);
       assert.equal(member.url, returnPath);
       const account = await call("/account", "GET", undefined, { cookie: member.cookie });
@@ -613,7 +795,7 @@ test("verified product registration grants ordinary access only to the originati
 
   assert.equal((await signup("internal-documents", "docs-signup")).status, 303);
   const docs = store.lookup(env.issuer, "oidc|docs-signup");
-  assert.equal(docs.status, "pending");
+  assert.equal(docs.status, "active");
   assert.equal(store.one("SELECT status FROM grants WHERE id=? AND product='internal-documents'", docs.id).status, "pending");
   assert.equal((await decide("docs-signup", "https://api.docs.onesa.eu", "docs-web")).status, 403);
 
@@ -633,7 +815,7 @@ test("a pending verified account can request a single product's administrator ac
   const memberHeaders = { cookie: member.cookie, origin: env.origin };
   const account = () => call("/account", "GET", undefined, memberHeaders);
   const html = await (await account()).text();
-  assert.match(html, /Request administrator access<\/button>/);
+  assert.doesNotMatch(html, /Request administrator access<\/button>/);
   const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
   const request = (product, headers = memberHeaders, token = csrf) => call("/account/enrollment", "POST",
     new URLSearchParams({ product, tier: "admin", csrf: token }), headers);
@@ -642,7 +824,7 @@ test("a pending verified account can request a single product's administrator ac
   assert.match(await expired.text(), /Sign in to continue/);
   const stale = await request("farmer", memberHeaders, "invalid");
   assert.equal(stale.status, 403);
-  assert.match(await stale.text(), /Reload your Onesa account/);
+  assert.match(await stale.text(), /Reload your account/);
   assert.equal((await request("farmer", { ...memberHeaders, origin: "https://outside.test" })).status, 403);
   assert.equal((await request("identity")).status, 400);
   assert.deepEqual([...productAdministratorRequests(store.db, actor.id)], []);
@@ -696,6 +878,59 @@ test("a pending verified account can request a single product's administrator ac
   assert.match(await (await account()).text(), /Administrator approved/);
 });
 
+test("protected entry offers normal signup and queues staff access only on an explicit verified request", async t => {
+  const audience = "https://api.pasofi.mobile.onesa.eu";
+  const { store, call, login, setRedeem } = await fixture(t, {
+    resources: new Map([[audience, { product: "pasofi", clients: ["pasofi-web"] }]]),
+  });
+  const path = "/access?product=pasofi&role=agent";
+  const subject = "auth0|k0-test-applicant";
+  const applicant = () => store.lookup(env.issuer, subject);
+  const decide = () => call("/internal/decision", "POST", JSON.stringify({
+    subject, audience, client: "pasofi-web",
+  }), { authorization: "Bearer " + env.policyKey });
+  assert.equal((await call("/access?product=pasofi&role=platform")).status, 404);
+  assert.match(await (await call(path)).text(), /Sign up/);
+  const returnPath = "/register?return=" + encodeURIComponent(path);
+  setRedeem(async () => ({ iss: env.issuer, sub: subject, email: "agent@example.test", email_verified: true }));
+  const started = await call(returnPath);
+  const params = new URL(started.headers.get("location")).searchParams;
+  assert.equal(params.get("screen_hint"), "signup");
+  const response = await call("/callback?code=fixture&state=" + params.get("state"), "GET", undefined,
+    { cookie: started.headers.getSetCookie()[0].split(";")[0] });
+  assert.equal(response.headers.get("location"), path);
+  assert.equal(applicant().status, "active");
+  assert.equal(store.staffRequest(applicant().id), undefined);
+  assert.deepEqual([...productAdministratorRequests(store.db, applicant().id)], []);
+  const headers = { origin: env.origin, cookie: response.headers.getSetCookie()[0].split(";")[0] };
+  const form = await (await call(path, "GET", undefined, headers)).text();
+  const csrf = form.match(/name="csrf" value="([^"]+)"/)[1];
+  assert.equal((await call(path, "POST", new URLSearchParams({ csrf }), { ...headers, origin: "https://outside.test" })).status, 403);
+  assert.equal((await call(path, "POST", new URLSearchParams({ csrf }), headers)).status, 303);
+  const revision = applicant().revision;
+  assert.equal((await call(path, "POST", new URLSearchParams({ csrf }), headers)).status, 303);
+  assert.equal(applicant().revision, revision);
+  assert.equal(store.staffRequest(applicant().id), "pending");
+  assert.equal((await decide()).status, 403);
+  setRedeem();
+  const reviewer = await login("identity-admin");
+  const viewer = { origin: env.origin, cookie: reviewer.cookie };
+  const panel = await (await call("/admin?product=pasofi", "GET", undefined, viewer)).text();
+  assert.match(panel, /Approve staff access/);
+  const reviewerCsrf = panel.match(/name="csrf" value="([^"]+)"/)[1];
+  const review = (status, browser = viewer, token = reviewerCsrf) => call("/admin/change", "POST",
+    new URLSearchParams({ kind: "product-staff-review", product: "pasofi", id: applicant().id,
+      revision: String(applicant().revision), status, csrf: token }), browser);
+  assert.equal((await review("active", headers, csrf)).status, 403);
+  assert.equal((await review("active")).status, 303);
+  assert.equal(store.staffRequest(applicant().id), "active");
+  assert.equal((await (await decide()).json()).require_mfa, true);
+  store.register(env.issuer, subject, "agent@example.test", "", "user", "pasofi");
+  assert.deepEqual((await (await decide()).json()).roles, ["customer", "agent"]);
+  assert.equal((await review("revoked")).status, 303);
+  assert.deepEqual((await (await decide()).json()).roles, ["customer"]);
+});
+
 test("one verified signup and independent review give product-scoped user or admin access", async t => {
   const resources = new Map([...accountProducts.keys()].map(product =>
     ["https://" + product + ".test", { product, clients: [product], ...(["factory", "farmer", "logistics"].includes(product) ? { sharedAdminRole: "admin" } : {}) }]));
@@ -713,7 +948,7 @@ test("one verified signup and independent review give product-scoped user or adm
         cookie: started.headers.getSetCookie()[0].split(";")[0],
       });
     };
-    const signup = tier === "user" ? "/register" : "/register?audience=admin";
+    const signup = "/register?audience=" + tier;
     const unverified = await apply(false, signup);
     assert.equal(unverified.status, 403);
     const retry = (await unverified.text()).match(/href="(\/login\?audience=[^"]+)"/)[1].replaceAll("&amp;", "&");
@@ -878,7 +1113,7 @@ test("Onesa Intranet groups its entry points and requests both scopes without gr
   const headers = { cookie: member.cookie, origin: env.origin };
   const dashboard = async () => (await call("/account", "GET", undefined, headers)).text();
   const initial = await dashboard();
-  assert.equal((initial.match(/<option value="intranet">Onesa Intranet<\/option>/g) ?? []).length, 2);
+  assert.equal((initial.match(/<option value="intranet">Onesa Intranet<\/option>/g) ?? []).length, 1);
   assert.doesNotMatch(initial, /<option value="(?:portal|internal-documents)">/);
   const csrf = initial.match(/name="csrf" value="([^"]+)"/)[1];
   const request = (path, form = {}) => call(path, "POST", new URLSearchParams({ product: "intranet", csrf, ...form }), headers);
@@ -2189,7 +2424,7 @@ test("Account revokes the local session before the optional Auth0 sign-out hando
       assert.equal(logout.headers.get("location"), "/account");
     }
     const replay = await (await call("/account", "GET", undefined, headers)).text();
-    assert.match(replay, /<h1>Sign in to Onesa<\/h1>/);
+    assert.match(replay, /<h1>Sign in<\/h1>/);
   }
 });
 
@@ -2599,4 +2834,32 @@ test("explicit Portal and product administrator grants always require MFA", asyn
   grant("portal", "administrator");
   store.change("bootstrap", account.id, revision(), { kind: "status", status: "suspended" });
   assert.equal((await decide("portal")).status, 403, "suspended administrator must fail closed");
+});
+
+test("a seller invitation requests approval only after matching verified signup", async t => {
+  const resources = new Map(env.resources);
+  resources.set("https://api.pasofi.mobile.onesa.eu", { product: "pasofi", clients: ["pasofi-web"] });
+  const { call, store, setRedeem } = await fixture(t, { resources });
+  const invitation = store.invite("test-administrator", "new-seller@onesa.test");
+  const access = "/access?product=pasofi&role=agent";
+  const start = "/register?" + new URLSearchParams({ invite: invitation, return: access });
+  const callback = async (email, email_verified) => {
+    const challenge = await call(start);
+    const state = new URL(challenge.headers.get("location")).searchParams.get("state");
+    const cookie = challenge.headers.getSetCookie()[0].split(";")[0];
+    setRedeem(async () => ({ iss: env.issuer, sub: "oidc|new-seller", email, email_verified }));
+    return call("/callback?code=controlled&state=" + state, "GET", undefined, { cookie });
+  };
+  const unverified = await callback("new-seller@onesa.test", false);
+  assert.match(await unverified.text(), new RegExp("invite=" + invitation));
+  assert.equal(store.lookup(env.issuer, "oidc|new-seller"), undefined);
+  assert.equal((await callback("wrong-address@onesa.test", true)).status, 409);
+  assert.equal(store.lookup(env.issuer, "oidc|new-seller"), undefined);
+
+  const accepted = await callback("new-seller@onesa.test", true);
+  assert.equal(accepted.headers.get("location"), access);
+  const seller = store.lookup(env.issuer, "oidc|new-seller");
+  assert.equal(store.staffRequest(seller.id), "pending");
+  assert.notEqual(store.activeGrant(seller.id, "pasofi")?.role, "agent");
+  assert.equal(store.one("SELECT 1 FROM invites WHERE hash=?", digest(invitation)), undefined);
 });

@@ -21,12 +21,14 @@ function tenant(initialTheme) {
 
 test("installs a new default theme and verifies both login flow types in both languages", async () => {
   const t = tenant(null);
-  assert.equal((await syncBranding(t.request)).length, 9);
+  assert.equal((await syncBranding(t.request)).length, 13);
   assert.deepEqual(t.writes, []);
   await syncBranding(t.request, true);
   assert.deepEqual(t.writes[0], ["POST", "/branding/themes"]);
-  assert.equal(t.prompts.get("/prompts/signup-id/custom-text/de")["signup-id"].title, "Onesa-Konto erstellen");
+  assert.equal(t.prompts.get("/prompts/signup-id/custom-text/de")["signup-id"].title, "Konto erstellen");
   assert.deepEqual(await syncBranding(t.request), []);
+  assert.equal(t.prompts.get("/prompts/login-id/custom-text/en")["login-id"].description, "Enter your email to continue.");
+  assert.equal(t.prompts.get("/prompts/signup-password/custom-text/en")["signup-password"].title, "Choose a password");
   const count = t.writes.length;
   await syncBranding(t.request, true);
   assert.equal(t.writes.length, count);
@@ -40,7 +42,8 @@ test("preserves unmanaged tenant fields and unrelated localized prompt overrides
   assert.deepEqual(t.writes[0], ["PATCH", "/branding/themes/test"]);
   assert.equal(t.current().widget.extra, true);
   assert.equal(t.current().fonts.font_url, "https://example.org/font.woff2");
+  assert.equal(t.prompts.get(path).login.title, "Sign in");
   assert.equal(t.prompts.get(path).login.forgotPasswordText, "Recover account");
   assert.equal(t.prompts.get(path).other.title, "Keep");
-  assert.match(t.prompts.get(path).login.description, /\$\{clientName\}/);
+  assert.equal(t.prompts.get(path).login.description, "Enter your email and password.");
 });

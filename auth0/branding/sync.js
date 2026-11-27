@@ -41,10 +41,10 @@ export async function syncBranding(request, apply = false) {
   // Prompt text PUT replaces all overrides for this language/prompt.
   // Preserve other screens and any labels that Onesa does not own.
   for (const [language, strings] of Object.entries(copy)) {
-    for (const [screen, family] of [["login", "login"], ["login-id", "login"], ["signup", "signup"], ["signup-id", "signup"]]) {
+    for (const [screen, fields] of Object.entries(strings)) {
       const path = "/prompts/" + screen + "/custom-text/" + language;
       const prior = await request(path, "GET");
-      const next = { ...prior, [screen]: { ...prior[screen], ...strings[family] } };
+      const next = { ...prior, [screen]: { ...prior[screen], ...fields } };
       if (isDeepStrictEqual(prior, next)) continue;
       pending.push(language + " " + screen);
       if (apply) await request(path, "PUT", next);

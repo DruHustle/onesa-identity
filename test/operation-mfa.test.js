@@ -5,6 +5,7 @@ import policy from "../auth0/post-login.cjs";
 
 const mfa = "http://schemas.openid.net/pape/policies/2007/06/multi-factor";
 const operation = "urn:onesa:authentication:operation-mfa";
+const pasoFiCustomer = "urn:onesa:authentication:pasofi-customer";
 const nonce = "Abcd1234".repeat(6);
 const ns = "https://onesa.eu/claims/";
 const decision = { user_id: "28994d67-999a-4a13-886b-9fafb2d54fc2", product: "portal", roles: ["administrator"] };
@@ -100,6 +101,49 @@ test("PasoFi renewal reassesses the product grant without minting fresh MFA evid
   await policy.onExecutePostLogin(revoked.event,revoked.api);
   assert.equal(revoked.denials.length,1);
   assert.deepEqual(revoked.claims,{});
+});
+
+test("PasoFi customer entry receives only customer access, even for an administrator", async t => {
+  let role = "administrator";
+  let decisionStatus = 200;
+  const endpoints = [];
+  t.mock.method(globalThis, "fetch", async url => {
+    endpoints.push(new URL(url).pathname);
+    return decisionStatus === 200
+      ? Response.json({ ...decision, product: "pasofi", roles: [role], require_mfa: role === "administrator" })
+      : new Response(null, { status: decisionStatus });
+  });
+  for (const [grantedRole, acr] of [["administrator", [pasoFiCustomer]], ["customer", pasoFiCustomer]]) {
+    role = grantedRole;
+    const f = fixture();
+    f.transaction.acr_values = acr;
+    f.event.authentication.methods = [];
+    await stepUp.onExecutePostLogin(f.event, f.api);
+    await policy.onExecutePostLogin(f.event, f.api);
+    assert.deepEqual(f.denials, []);
+    assert.deepEqual(f.challenges, []);
+    assert.deepEqual(f.enrollments, []);
+    assert.deepEqual(f.claims, {
+      [ns + "user_id"]: decision.user_id,
+      [ns + "products"]: ["pasofi"],
+      [ns + "roles"]: ["customer"],
+    });
+  }
+  assert.deepEqual(endpoints, Array(4).fill("/internal/decision"));
+
+  role = "administrator";
+  const mixed = fixture();
+  mixed.transaction.acr_values = [mfa, pasoFiCustomer];
+  await policy.onExecutePostLogin(mixed.event, mixed.api);
+  assert.equal(mixed.denials.length, 1);
+  assert.deepEqual(mixed.claims, {});
+
+  decisionStatus = 403;
+  const revoked = fixture();
+  revoked.transaction.acr_values = [pasoFiCustomer];
+  await policy.onExecutePostLogin(revoked.event, revoked.api);
+  assert.equal(revoked.denials.length, 1);
+  assert.deepEqual(revoked.claims, {});
 });
 
 test("interactive PasoFi staff sign-in requires the one-use Authenticator continuation", async t => {

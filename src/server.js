@@ -1,20 +1,25 @@
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
-import { openStore, products, configurableAdminRoles } from "./store.js";
+import { openStore, products, configurableAdminRoles, sharedProducts } from "./store.js";
 import { createApp } from "./web.js";
 import { infrastructureEntry, registrationReturns, returnKey } from "./registration-returns.js";
 
 const hostname = url => url.hostname.replace(/\.$/, "");
 const productionIdentityHosts = ["account.onesa.eu", "auth.onesa.eu", "onesa.eu.auth0.com"];
 
-function stagingRegistrationReturns(issuer, account, override) {
+function productionRegistrationHosts() {
   const productionAccount = "https://account.onesa.eu";
   const productionHosts = new Set([...productionIdentityHosts, "portainer.onesa.eu"]);
   for (const target of registrationReturns(productionAccount).values()) {
     const url = new URL(target);
     if (url.protocol === "https:") productionHosts.add(hostname(url));
   }
+  return productionHosts;
+}
+
+function stagingRegistrationReturns(issuer, account, override) {
+  const productionHosts = productionRegistrationHosts();
   if (hostname(issuer) === hostname(account) ||
       [issuer, account].some(url => productionHosts.has(hostname(url))))
     throw Error("Staging requires separate nonproduction issuer and Account hosts");
@@ -65,6 +70,9 @@ export function configuration(env) {
     : registrationReturns(origin.origin, env.REGISTRATION_RETURNS_JSON);
   const resources = new Map(),
     catalog = JSON.parse(required("RESOURCE_CLIENTS_JSON"));
+  const clientId = required("OIDC_CLIENT_ID");
+  const enrollmentReturns = new Set([origin.origin + "/callback"]);
+  const productionHosts = isStaging ? productionRegistrationHosts() : new Set();
   for (const [audience, resource] of Object.entries(catalog)) {
     let endpoint;
     try {
@@ -85,6 +93,8 @@ export function configuration(env) {
       Array.isArray(resource) ||
       !Object.hasOwn(products, resource.product) ||
       resource.product === "identity" ||
+      (resource.platformAdmin !== undefined &&
+        (typeof resource.platformAdmin !== "boolean" || !products[resource.product].includes("administrator"))) ||
       (resource.sharedAdminRole !== undefined &&
         (!configurableAdminRoles.has(resource.product) ||
           !["admin", "administrator"].includes(resource.sharedAdminRole))) ||
@@ -100,12 +110,27 @@ export function configuration(env) {
       new Set(resource.clients).size !== resource.clients.length
     )
       throw Error("Invalid resource registry");
+    if (resource.enrollmentCallbacks !== undefined) {
+      if (!sharedProducts.has(resource.product) || !Array.isArray(resource.enrollmentCallbacks) ||
+          !resource.enrollmentCallbacks.length)
+        throw Error("Invalid application enrollment registry");
+      for (const callback of resource.enrollmentCallbacks) {
+        const destination = typeof callback?.redirectUri === "string" && URL.parse(callback.redirectUri);
+        if (!destination || destination.protocol !== "https:" || destination.href !== callback.redirectUri ||
+            destination.username || destination.password || destination.search || destination.hash ||
+            destination.hostname === origin.hostname || destination.hostname === issuer.hostname ||
+            productionHosts.has(hostname(destination)) ||
+            callback.client === clientId || !resource.clients.includes(callback.client) ||
+            enrollmentReturns.has(destination.href))
+          throw Error("Invalid application enrollment registry");
+        enrollmentReturns.add(destination.href);
+      }
+    }
     resources.set(audience, resource);
   }
   const policyKey = credential("ACTION_POLICY_KEY");
   if (policyKey.length < 32)
     throw Error("ACTION_POLICY_KEY must be high entropy");
-  const clientId = required("OIDC_CLIENT_ID");
   let verification;
   if (env.AUTH0_VERIFICATION_ORIGIN || env.AUTH0_VERIFICATION_CLIENT_ID ||
       env.AUTH0_VERIFICATION_CLIENT_SECRET || env.AUTH0_VERIFICATION_CLIENT_SECRET_FILE) {
