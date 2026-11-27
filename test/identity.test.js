@@ -2172,10 +2172,15 @@ test("Account revokes the local session before the optional Auth0 sign-out hando
     const denied = await call("/logout", "POST", new URLSearchParams({ csrf: "invalid" }), headers);
     assert.equal(denied.status, 403);
     const logout = await call("/logout", "POST", new URLSearchParams({ csrf }), headers);
-    assert.equal(logout.status, 303);
+    assert.equal(logout.status, auth0LogoutEnabled ? 200 : 303);
     assert.equal(logout.headers.getSetCookie().filter(value => value.includes("Max-Age=0")).length, 2);
     if (auth0LogoutEnabled) {
-      const destination = new URL(logout.headers.get("location"));
+      assert.equal(logout.headers.get("location"), null);
+      assert.equal(logout.headers.get("referrer-policy"), "no-referrer");
+      const body = await logout.text();
+      const refresh = body.match(/<meta http-equiv="refresh" content="0;url=([^"]+)">/)[1];
+      assert.ok(body.includes('href="' + refresh + '">Continue signing out</a>'));
+      const destination = new URL(refresh.replaceAll("&amp;", "&"));
       assert.equal(destination.origin + destination.pathname, env.issuer + "oidc/logout");
       assert.deepEqual(Object.fromEntries(destination.searchParams), {
         client_id: env.clientId, post_logout_redirect_uri: env.origin,

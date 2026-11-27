@@ -1057,7 +1057,13 @@ export function createApp(store, env, client = authClient(env)) {
           client_id: env.clientId,
           post_logout_redirect_uri: env.origin,
         });
-        return redirect(provider.href, expiredCookies);
+        // Complete the same-origin form before navigating to the provider.
+        const handoff = page("Signing out",
+          '<a class="primary" href="' + esc(provider.href) + '">Continue signing out</a>',
+          200, false, false, provider.href);
+        for (const expired of expiredCookies) handoff.headers.append("set-cookie", expired);
+        handoff.headers.set("referrer-policy", "no-referrer");
+        return handoff;
       }
     }
     if (!["/admin", "/admin/change", "/admin/invite"].includes(p))
